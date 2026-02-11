@@ -11,11 +11,13 @@ st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
 # --- CONFIG ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
-HOSPITAL_LAT = 42.0806
-HOSPITAL_LON = -71.0264
+
+# 🔴 CRITICAL UPDATE: CORRECT COORDINATES FOR 680 CENTRE ST
+HOSPITAL_LAT = 42.0875
+HOSPITAL_LON = -70.9915
 GEOFENCE_RADIUS = 300 
 
-# --- USER DATABASE (Now with CFO) ---
+# --- USER DATABASE ---
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "Respiratory Therapist", "rate": 85.00},
     "1002": {"name": "Sarah Connor", "role": "RN - ICU", "rate": 95.00},
@@ -74,14 +76,13 @@ if user['role'] == "CFO":
     c2.metric("HOURLY BURN", f"${burn_rate:,.2f}", "Normal")
     c3.metric("SHIFT LIABILITY", f"${total_liab:,.2f}", "+$450")
     
-    # 2. Live Map
+    # 2. Live Map (Centered on CORRECT Hospital Location)
     st.markdown("### 📍 GLOBAL ASSET TRACKING")
-    # Simulating workers around the hospital
     map_data = pd.DataFrame({
         'lat': [HOSPITAL_LAT + random.uniform(-0.001, 0.001) for _ in range(active_workers)],
         'lon': [HOSPITAL_LON + random.uniform(-0.001, 0.001) for _ in range(active_workers)]
     })
-    st.map(map_data, zoom=14)
+    st.map(map_data, zoom=15)
     
     # 3. Active Personnel List
     st.markdown("### 📋 ON-DUTY ROSTER")
