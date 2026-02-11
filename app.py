@@ -9,7 +9,15 @@ from streamlit_js_eval import get_geolocation
 
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
-# SECURITY & CONFIG
+# --- 1. TAX CONFIGURATION (2026 MA/FED) ---
+TAX_RATES = {
+    "FED": 0.22,   # Federal Supplemental Rate
+    "MA": 0.05,    # Massachusetts Flat Tax
+    "SS": 0.062,   # Social Security
+    "MED": 0.0145  # Medicare
+}
+
+# --- 2. SECURITY & DATA ---
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "Respiratory Therapist", "rate": 85.00}
 }
@@ -21,13 +29,7 @@ if 'ledger' not in st.session_state: st.session_state.ledger = []
 if 'user_state' not in st.session_state: 
     st.session_state.user_state = {'active': False, 'start_time': None, 'earnings': 0.0}
 
-# --- DEV TOOLS (HIDDEN) ---
-# This allows you to force "Inside Zone" if GPS fails
-with st.sidebar:
-    st.caption("DEV TOOLS")
-    dev_override = st.checkbox("FORCE GPS: INSIDE")
-
-# --- MATH & LOGIC ---
+# --- 3. HELPER FUNCTIONS ---
 def get_distance(lat1, lon1, lat2, lon2):
     R = 6371000 
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -37,16 +39,24 @@ def get_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return c * R
 
-def log_transaction(user, action, amount=None):
-    # Encryption logic
+def calculate_taxes(gross_amount):
+    fed = gross_amount * TAX_RATES["FED"]
+    ma = gross_amount * TAX_RATES["MA"]
+    ss = gross_amount * TAX_RATES["SS"]
+    med = gross_amount * TAX_RATES["MED"]
+    total_tax = fed + ma + ss + med
+    net = gross_amount - total_tax
+    return net, fed, ma, ss, med
+
+def log_transaction(user, action):
     enc_id = f"0x{hashlib.sha256(user.encode()).hexdigest()[:8]}..."
     timestamp = datetime.now().strftime("%H:%M")
-    note = f"TX: {enc_id} | {action}"
-    st.session_state.ledger.append(f"[{timestamp}] {note}")
+    st.session_state.ledger.append(f"[{timestamp}] TX: {enc_id} | {action}")
 
-# --- LOGIN ---
+# --- 4. LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
+    st.caption("Secure Tax-Compliant Portal")
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
         if pin in USERS:
@@ -56,61 +66,81 @@ if 'logged_in_user' not in st.session_state:
             st.error("INVALID ACCESS")
     st.stop()
 
-# --- MAIN DASHBOARD ---
+# --- 5. MAIN DASHBOARD ---
 user = st.session_state.logged_in_user
 st.title(f"👤 {user['name']}")
-status = "🟢 ON SHIFT" if st.session_state.user_state['active'] else "⚪ OFF DUTY"
-st.caption(f"Status: {status}")
+st.caption(f"Role: {user['role']} | Rate: ${user['rate']}/hr")
 
-# EARNINGS
-current = st.session_state.user_state['earnings']
+# --- REAL-TIME INCOME CALCULATOR ---
+gross_pay = st.session_state.user_state['earnings']
+
+# Add active time if clock is running
 if st.session_state.user_state['active']:
-    session_pay = ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
-    st.metric("ACCRUED EARNINGS", f"${current + session_pay:,.2f}")
-else:
-    st.metric("WALLET BALANCE", f"${current:,.2f}")
+    elapsed_hours = (time.time() - st.session_state.user_state['start_time']) / 3600
+    current_session = elapsed_hours * user['rate']
+    gross_pay += current_session
 
-# GPS SENTINEL
+# CALCULATE TAXES
+net_pay, fed, ma, ss, med = calculate_taxes(gross_pay)
+
+# DISPLAY CARDS
+col1, col2 = st.columns(2)
+col1.metric("GROSS EARNINGS", f"${gross_pay:,.2f}", delta="Pre-Tax")
+col2.metric("NET PAY (DEPOSIT)", f"${net_pay:,.2f}", delta="-34.65% Tax", delta_color="inverse")
+
+# TAX BREAKDOWN DROPDOWN
+with st.expander("SEE TAX BREAKDOWN (2026 ESTIMATE)"):
+    t1, t2 = st.columns(2)
+    t1.write(f"🇺🇸 **Federal (22%):** -${fed:.2f}")
+    t1.write(f"🏛️ **MA State (5%):** -${ma:.2f}")
+    t2.write(f"👴 **FICA (6.2%):** -${ss:.2f}")
+    t2.write(f"🏥 **Medicare (1.45%):** -${med:.2f}")
+
 st.markdown("---")
-st.markdown("### 📡 SATELLITE LINK")
 
+# --- GPS SENTINEL ---
+st.markdown("### 📡 SATELLITE LINK")
 loc = get_geolocation()
 is_inside = False
+
+# DEV OVERRIDE (Hidden in Sidebar)
+with st.sidebar:
+    st.header("DEV TOOLS")
+    dev_override = st.checkbox("FORCE GPS: INSIDE (Simulate)")
 
 if loc:
     dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
     is_inside = dist < GEOFENCE_RADIUS
-    st.write(f"GPS Distance: {int(dist)}m")
     
-# DEV OVERRIDE LOGIC
-if dev_override:
-    is_inside = True
-    st.warning("⚠️ DEV OVERRIDE ACTIVE: GPS BYPASSED")
-
-if is_inside:
-    st.success("✅ VERIFIED: INSIDE GEOFENCE")
-else:
-    st.error("🚫 BLOCKED: OUTSIDE GEOFENCE")
-
-# SYNC BUTTON
-if st.button("🔄 SYNC STATUS"):
-    if is_inside and not st.session_state.user_state['active']:
-        st.session_state.user_state['active'] = True
-        st.session_state.user_state['start_time'] = time.time()
-        log_transaction(user['name'], "CLOCK IN")
-        st.rerun()
-    elif not is_inside and st.session_state.user_state['active']:
-        # Auto Clock Out
-        elapsed = (time.time() - st.session_state.user_state['start_time']) / 3600
-        st.session_state.user_state['earnings'] += elapsed * user['rate']
-        st.session_state.user_state['active'] = False
-        log_transaction(user['name'], "AUTO-CLOCK OUT")
-        st.rerun()
+    if dev_override:
+        is_inside = True
+        st.warning("⚠️ DEV OVERRIDE ACTIVE")
+    
+    if is_inside:
+        st.success(f"✅ VERIFIED: INSIDE GEOFENCE ({int(dist)}m)")
+        
+        # ACTIVE BUTTONS
+        if not st.session_state.user_state['active']:
+            if st.button("🟢 CLOCK IN"):
+                st.session_state.user_state['active'] = True
+                st.session_state.user_state['start_time'] = time.time()
+                log_transaction(user['name'], "CLOCK IN")
+                st.rerun()
+        else:
+            if st.button("🔴 CLOCK OUT & SETTLE"):
+                st.session_state.user_state['earnings'] = gross_pay # Lock it in
+                st.session_state.user_state['active'] = False
+                log_transaction(user['name'], "CLOCK OUT")
+                st.rerun()
     else:
-        st.toast("Status Updated")
+        st.error(f"🚫 BLOCKED: OUTSIDE GEOFENCE ({int(dist)}m)")
+        if st.session_state.user_state['active']:
+            st.warning("⚠️ You left the zone! Please clock out.")
+else:
+    st.info("Waiting for GPS signal...")
 
-# LEDGER
+# --- LEDGER ---
 st.markdown("---")
-st.caption("ENCRYPTED LEDGER")
+st.caption("ENCRYPTED TRANSACTION LOG")
 for l in reversed(st.session_state.ledger[-5:]):
     st.code(l)
