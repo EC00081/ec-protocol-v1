@@ -1,0 +1,187 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2867
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 import streamlit as st\
+import pandas as pd\
+import matplotlib.pyplot as plt\
+import time\
+import random\
+from datetime import datetime\
+from fpdf import FPDF\
+import base64\
+\
+# ==========================================\
+# 1. CONFIGURATION & STATE\
+# ==========================================\
+st.set_page_config(page_title="Gilford Son & Co.", page_icon="\uc0\u55357 \u57057 \u65039 ", layout="centered")\
+\
+# Initialize Session State (The Database)\
+if 'pool' not in st.session_state: st.session_state.pool = 50000.0\
+if 'revenue' not in st.session_state: st.session_state.revenue = 0.0\
+if 'ledger' not in st.session_state: st.session_state.ledger = []\
+if 'history' not in st.session_state: st.session_state.history = [50000.0]\
+if 'worker_active' not in st.session_state: st.session_state.worker_active = False\
+\
+# Constants\
+BASE_RATE = 85.00\
+LOW_LIQ_THRESH = 15000.0\
+\
+# ==========================================\
+# 2. STYLING (The "Black Rock" Look)\
+# ==========================================\
+st.markdown("""\
+    <style>\
+    .main \{ background-color: #0F1115; color: #E0E0E0; \}\
+    .stButton>button \{ width: 100%; border-radius: 5px; font-weight: bold; \}\
+    .metric-card \{ background: rgba(255,255,255,0.05); padding: 15px; border-radius: 10px; border: 1px solid #333; \}\
+    .big-val \{ font-size: 24px; font-weight: bold; color: #FFFFFF; \}\
+    .label \{ font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; \}\
+    .success \{ color: #00FF94; \}\
+    .danger \{ color: #FF4444; \}\
+    </style>\
+""", unsafe_allow_html=True)\
+\
+# ==========================================\
+# 3. HELPER FUNCTIONS\
+# ==========================================\
+def generate_pdf(worker, gross, tax, fee, net):\
+    pdf = FPDF()\
+    pdf.add_page()\
+    pdf.set_font("Arial", 'B', 16)\
+    pdf.cell(200, 10, txt="GILFORD SON & CO.", ln=1, align='C')\
+    pdf.set_font("Arial", size=10)\
+    pdf.cell(200, 10, txt="OFFICIAL TRANSACTION RECEIPT", ln=1, align='C')\
+    pdf.line(10, 30, 200, 30)\
+    pdf.ln(20)\
+    \
+    pdf.set_font("Arial", size=12)\
+    pdf.cell(200, 10, txt=f"Date: \{datetime.now().strftime('%Y-%m-%d %H:%M:%S')\}", ln=1)\
+    pdf.cell(200, 10, txt=f"Worker Identity: \{worker\}", ln=1)\
+    pdf.ln(10)\
+    \
+    pdf.cell(200, 10, txt=f"Gross Earnings:   $\{gross:.2f\}", ln=1)\
+    pdf.cell(200, 10, txt=f"IRS Withholding: -$\{tax:.2f\}", ln=1)\
+    pdf.cell(200, 10, txt=f"Protocol Fee:    -$\{fee:.2f\}", ln=1)\
+    pdf.set_font("Arial", 'B', 12)\
+    pdf.cell(200, 10, txt=f"NET DEPOSIT:      $\{net:.2f\}", ln=1)\
+    \
+    pdf.output("receipt.pdf")\
+    with open("receipt.pdf", "rb") as f:\
+        return f.read()\
+\
+# ==========================================\
+# 4. APP LAYOUT\
+# ==========================================\
+st.title("\uc0\u55357 \u57057 \u65039  Gilford Son & Co.")\
+st.caption("EC PROTOCOL v39.0 | SOVEREIGN DEPLOYMENT")\
+\
+# --- MODE TOGGLE ---\
+mode = st.radio("System Mode", ["Live Operations", "Investor Demo"], horizontal=True)\
+\
+# --- METRICS DASHBOARD ---\
+col1, col2 = st.columns(2)\
+with col1:\
+    st.markdown(f"""\
+        <div class="metric-card">\
+            <div class="label">Network Liquidity</div>\
+            <div class="big-val">$\{st.session_state.pool:,.2f\}</div>\
+        </div>\
+    """, unsafe_allow_html=True)\
+\
+with col2:\
+    st.markdown(f"""\
+        <div class="metric-card">\
+            <div class="label">Protocol Revenue</div>\
+            <div class="big-val success">$\{st.session_state.revenue:,.2f\}</div>\
+        </div>\
+    """, unsafe_allow_html=True)\
+\
+# --- CHART ---\
+st.markdown("### \uc0\u55357 \u56521  Liquidity Burn Rate")\
+chart_data = pd.DataFrame(st.session_state.history, columns=["Pool Balance"])\
+st.line_chart(chart_data, color="#00FF94")\
+\
+# ==========================================\
+# 5. LOGIC GATES\
+# ==========================================\
+\
+if mode == "Live Operations":\
+    col_a, col_b = st.columns(2)\
+    \
+    with col_a:\
+        if st.button("\uc0\u55357 \u57314  CLOCK IN"):\
+            st.session_state.pool -= 0.50\
+            st.session_state.history.append(st.session_state.pool)\
+            st.session_state.ledger.append(f"IN: Manual User")\
+            st.session_state.worker_active = True\
+            st.rerun()\
+            \
+    with col_b:\
+        if st.button("\uc0\u55357 \u56628  SETTLE SHIFT"):\
+            if st.session_state.worker_active:\
+                st.session_state.pool -= 100\
+                st.session_state.history.append(st.session_state.pool)\
+                st.session_state.ledger.append(f"OUT: Manual User")\
+                st.session_state.worker_active = False\
+                st.success("Shift Settled.")\
+                st.rerun()\
+            else:\
+                st.error("No Active Shift.")\
+\
+else: # INVESTOR DEMO MODE\
+    if st.button("\uc0\u9654 \u65039  PLAY PITCH SCENARIO"):\
+        # Reset\
+        st.session_state.pool = 50000.0\
+        st.session_state.revenue = 0.0\
+        st.session_state.history = [50000.0]\
+        st.session_state.ledger = []\
+        \
+        # 1. Clock In\
+        with st.spinner("\uc0\u55357 \u56525  Verifying Geofence..."):\
+            time.sleep(1)\
+        st.toast("\uc0\u9989  Geofence Verified: Brockton Signature")\
+        \
+        st.session_state.pool -= 0.50\
+        st.session_state.history.append(st.session_state.pool)\
+        \
+        # 2. Sim Work\
+        my_bar = st.progress(0)\
+        for i in range(100):\
+            time.sleep(0.02)\
+            if i % 10 == 0:\
+                st.session_state.pool -= random.uniform(50, 150)\
+                st.session_state.history.append(st.session_state.pool)\
+            my_bar.progress(i + 1)\
+            \
+        # 3. Settle\
+        gross = 1020.00\
+        tax = 153.00\
+        fee = 20.40\
+        net = gross - tax - fee\
+        \
+        st.session_state.pool -= gross\
+        st.session_state.revenue += fee\
+        st.session_state.history.append(st.session_state.pool)\
+        st.session_state.ledger.append("DEMO COMPLETE")\
+        \
+        st.success(f"\uc0\u55357 \u56496  PAYMENT SETTLED: +$\{net:.2f\}")\
+        \
+        # 4. Generate Receipt\
+        pdf_bytes = generate_pdf("Liam_RT", gross, tax, fee, net)\
+        st.download_button(\
+            label="\uc0\u55357 \u56516  DOWNLOAD OFFICIAL RECEIPT",\
+            data=pdf_bytes,\
+            file_name="Gilford_Receipt.pdf",\
+            mime="application/pdf"\
+        )\
+        st.rerun()\
+\
+# --- LEDGER ---\
+st.markdown("---")\
+st.markdown("### \uc0\u55357 \u56540  Immutable Ledger")\
+for entry in reversed(st.session_state.ledger[-5:]):\
+    st.text(entry)}
