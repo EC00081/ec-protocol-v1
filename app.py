@@ -16,6 +16,7 @@ st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 HOSPITAL_LAT = 42.0875
 HOSPITAL_LON = -70.9915
 GEOFENCE_RADIUS = 300 
+GRACE_PERIOD_SECONDS = 900  # 15 Minutes
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
 # ⚡ HEARTBEAT
@@ -59,6 +60,14 @@ def update_cloud_status(pin, status, start_time, earnings):
                 sheet.append_row([str(pin), status, str(start_time), str(earnings), str(datetime.now())])
         except: pass
 
+def log_to_ledger(pin, action, earnings, msg):
+    client = get_db_connection()
+    if client:
+        try:
+            sheet = client.open("ec_database").worksheet("history")
+            sheet.append_row([str(pin), action, str(datetime.now()), f"${earnings:.2f}", msg])
+        except: pass
+
 def log_transaction(pin, amount, method):
     client = get_db_connection()
     if client:
@@ -69,25 +78,13 @@ def log_transaction(pin, amount, method):
             return tx_id
         except: return "ERR"
 
-def log_to_ledger(pin, action, earnings, msg):
-    client = get_db_connection()
-    if client:
-        try:
-            sheet = client.open("ec_database").worksheet("history")
-            sheet.append_row([str(pin), action, str(datetime.now()), f"${earnings:.2f}", msg])
-        except: pass
-
-# --- INTEGRITY CHECKS ---
-def verify_integrity(claimed_lat, claimed_lon):
+# --- NETWORK & MATH ---
+def get_current_ip():
     try:
-        # Simple IP check (Demo)
-        response = requests.get('https://ipapi.co/json/').json()
-        discrepancy = get_distance(claimed_lat, claimed_lon, response.get('latitude'), response.get('longitude'))
-        return {"suspicious": discrepancy > 50000, "ip": response.get('ip'), "discrepancy": discrepancy}
+        return requests.get('https://api.ipify.org').text
     except:
-        return {"suspicious": False, "error": "Lookup Failed"}
+        return "Unknown"
 
-# --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
     try:
         R = 6371000 
@@ -102,10 +99,57 @@ def get_distance(lat1, lon1, lat2, lon2):
 def calculate_taxes(gross):
     return gross * (1 - sum(TAX_RATES.values()))
 
+# --- CALLBACKS (THE BUG FIX) ---
+# Executed INSTANTLY when button is clicked
+
+def cb_clock_in():
+    pin = st.session_state.pin
+    
+    # LOCK LOCAL STATE INSTANTLY
+    st.session_state.user_state['active'] = True
+    st.session_state.user_state['start_time'] = time.time()
+    st.session_state.user_state['last_seen_inside'] = time.time()
+    
+    # Capture "Home Base" IP
+    current_ip = get_current_ip()
+    st.session_state.user_state['clock_in_ip'] = current_ip
+    
+    # Update Cloud
+    update_cloud_status(pin, "Active", time.time(), st.session_state.user_state['earnings'])
+    log_to_ledger(pin, "CLOCK IN", st.session_state.user_state['earnings'], f"IP: {current_ip}")
+
+def cb_clock_out():
+    pin = st.session_state.pin
+    earnings = st.session_state.user_state['earnings']
+    
+    # LOCK LOCAL STATE INSTANTLY
+    st.session_state.user_state['active'] = False
+    
+    # Update Cloud
+    update_cloud_status(pin, "Inactive", 0, earnings)
+    log_to_ledger(pin, "CLOCK OUT", earnings, "User Action")
+
+def cb_payout():
+    pin = st.session_state.pin
+    amount = calculate_taxes(st.session_state.user_state['earnings'])
+    
+    log_transaction(pin, amount, "Instant_Rail")
+    update_cloud_status(pin, "Inactive", 0, 0)
+    log_to_ledger(pin, "PAYOUT", amount, "Settled")
+    
+    st.session_state.user_state['earnings'] = 0.0
+    st.session_state.user_state['payout_success'] = True
+
 # --- STATE INIT ---
 if 'user_state' not in st.session_state: 
-    # processing: The "Lock" that prevents double clicks
-    st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0, 'processing': False}
+    st.session_state.user_state = {
+        'active': False, 
+        'start_time': 0.0, 
+        'earnings': 0.0, 
+        'last_seen_inside': time.time(),
+        'clock_in_ip': None,
+        'payout_success': False
+    }
 
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "RT", "rate": 85.00},
@@ -115,7 +159,7 @@ USERS = {
 # --- LOGIN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v56.0 | The Wallet Protocol")
+    st.caption("v58.0 | Hybrid Sentinel (GPS + IP)")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -123,19 +167,20 @@ if 'logged_in_user' not in st.session_state:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
             
-            # Initial Cloud Sync
             if USERS[pin]['role'] != "Exec":
-                cloud = get_cloud_state(pin)
-                if cloud.get('status') == 'Active':
-                    st.session_state.user_state['active'] = True
-                    try: 
-                        st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
-                        st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                    except: pass
-                else:
-                    st.session_state.user_state['active'] = False
-                    try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                    except: pass
+                with st.spinner("Syncing Cloud State..."):
+                    cloud = get_cloud_state(pin)
+                    if cloud.get('status') == 'Active':
+                        st.session_state.user_state['active'] = True
+                        try:
+                            st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
+                            st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
+                            st.session_state.user_state['last_seen_inside'] = time.time()
+                        except: pass
+                    else:
+                        st.session_state.user_state['active'] = False
+                        try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
+                        except: pass
             
             st.rerun()
         else:
@@ -149,38 +194,66 @@ pin = st.session_state.pin
 if user['role'] != "Exec":
     st.title(f"👤 {user['name']}")
     
-    # --- 1. STATE MANAGEMENT (THE BUG FIX) ---
-    # We check 'processing' first. If processing is True, we LOCK the UI.
-    if st.session_state.user_state['processing']:
-        st.info("🔄 Processing Blockchain Transaction...")
-        # We stop drawing here to prevent double clicks
-        # But we need a way to 'unlock' if it gets stuck, so we auto-refresh
-        time.sleep(2)
-        st.session_state.user_state['processing'] = False
-        st.rerun()
-
-    # GPS
+    # 1. HYBRID LOCATION LOGIC
     loc = get_geolocation()
-    is_inside = False
-    dist_msg = "Acquiring Signal..."
+    current_ip = get_current_ip()
     
+    # Logic flags
+    gps_inside = False
+    ip_match = False
+    status_msg = "Checking Signals..."
+    
+    # A. GPS CHECK
     with st.sidebar:
-        dev_override = st.checkbox("FORCE INSIDE ZONE")
+        dev_override = st.checkbox("FORCE GPS SIGNAL")
         if st.button("LOGOUT"):
             st.session_state.clear()
             st.rerun()
 
     if loc:
         dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
-        is_inside = dist < GEOFENCE_RADIUS or dev_override
-        dist_msg = f"✅ INSIDE ({int(dist)}m)" if is_inside else f"🚫 OUTSIDE ({int(dist)}m)"
+        gps_inside = dist < GEOFENCE_RADIUS or dev_override
     
-    st.info(f"📍 GPS: {dist_msg}")
+    # B. IP CHECK (The "Lifeline")
+    # If the current IP matches the IP we used to Clock In, we assume we are still on the same Wifi
+    if st.session_state.user_state.get('clock_in_ip') == current_ip:
+        ip_match = True
 
-    # Money Logic
+    # C. FINAL JUDGMENT
+    if gps_inside:
+        status_msg = "✅ GPS VERIFIED (Optimal)"
+        st.session_state.user_state['last_seen_inside'] = time.time() # Reset Timer
+    elif ip_match and st.session_state.user_state['active']:
+        # MRI MODE: GPS Failed, but IP is same. SAFE.
+        status_msg = "⚠️ GPS LOST - IP MATCH (SAFE MODE)"
+        st.session_state.user_state['last_seen_inside'] = time.time() # Reset Timer
+    else:
+        # DANGER ZONE
+        time_gone = time.time() - st.session_state.user_state['last_seen_inside']
+        if st.session_state.user_state['active']:
+            if time_gone < GRACE_PERIOD_SECONDS:
+                mins = int((GRACE_PERIOD_SECONDS - time_gone) / 60)
+                status_msg = f"⏳ SIGNAL LOST - GRACE PERIOD ({mins}m Left)"
+            else:
+                status_msg = "❌ SIGNAL LOST - AUTO CLOCK OUT"
+                cb_clock_out()
+                st.rerun()
+        else:
+            status_msg = "🚫 OUTSIDE ZONE"
+
+    # Display Status
+    if "SAFE" in status_msg or "VERIFIED" in status_msg:
+        st.success(f"📍 {status_msg}")
+    elif "GRACE" in status_msg:
+        st.warning(f"📍 {status_msg}")
+    else:
+        st.error(f"📍 {status_msg}")
+        
+    st.caption(f"Current IP: {current_ip}")
+
+    # 2. EARNINGS
     is_active = st.session_state.user_state['active']
     current_earnings = st.session_state.user_state['earnings']
-    
     if is_active:
         start = st.session_state.user_state['start_time']
         if start > 0:
@@ -189,105 +262,40 @@ if user['role'] != "Exec":
     
     net_pay = calculate_taxes(current_earnings)
 
-    # --- 2. WORKFLOW UI ---
-    
-    # A. CLOCK IN / OUT SECTION
-    st.markdown("### ⏱️ Shift Controls")
+    # 3. CONTROLS
+    st.markdown("### ⏱️ Controls")
     c1, c2 = st.columns(2)
-    c1.metric("GROSS EARNED", f"${current_earnings:,.2f}")
-    c2.metric("NET PAYABLE", f"${net_pay:,.2f}")
+    c1.metric("GROSS", f"${current_earnings:,.2f}")
+    c2.metric("NET", f"${net_pay:,.2f}")
 
     if is_active:
-        st.success("🟢 ON SHIFT - EARNING")
-        if st.button("🔴 CLOCK OUT (End Shift)"):
-            st.session_state.user_state['processing'] = True # LOCK UI
-            
-            # Local update
-            st.session_state.user_state['active'] = False
-            st.session_state.user_state['earnings'] = current_earnings # Lock in final amount
-            
-            # Cloud update
-            update_cloud_status(pin, "Inactive", 0, current_earnings)
-            log_to_ledger(pin, "CLOCK OUT", current_earnings, dist_msg)
-            
-            st.rerun() # Unlock happens on reload
-            
+        st.button("🔴 CLOCK OUT", on_click=cb_clock_out)
     else:
-        st.warning("⚪ OFF DUTY")
-        if st.button("🟢 CLOCK IN"):
-            if is_inside:
-                st.session_state.user_state['processing'] = True # LOCK UI
-                
-                # Local update
-                st.session_state.user_state['active'] = True
-                st.session_state.user_state['start_time'] = time.time()
-                
-                # Cloud update
-                update_cloud_status(pin, "Active", time.time(), current_earnings)
-                log_to_ledger(pin, "CLOCK IN", current_earnings, dist_msg)
-                
-                st.rerun()
-            else:
-                st.error("Cannot Clock In: Outside Zone")
+        if gps_inside:
+            st.button("🟢 CLOCK IN", on_click=cb_clock_in)
+        else:
+            st.error("Must be on-site to start.")
 
-    # B. WALLET SECTION (New!)
+    # 4. WALLET
     st.markdown("---")
-    st.markdown("### 💳 Digital Wallet")
-    
-    # We use the 'net_pay' calculated from 'current_earnings' (which is now static if clocked out)
-    available_funds = net_pay if not is_active else 0.0 # Only allow withdrawal if clocked out? 
-    # Actually, let's allow withdrawal of ACCRUED funds even if active? 
-    # No, safer to require Clock Out for settlement first.
-    
     if not is_active and net_pay > 0.01:
-        st.info(f"💰 AVAILABLE TO WITHDRAW: **${net_pay:,.2f}**")
-        
-        if st.button("💸 INITIATE PAYOUT"):
-            with st.spinner("Verifying Fraud Markers..."):
-                integrity = verify_integrity(loc['coords']['latitude'], loc['coords']['longitude']) if loc else {'suspicious': False}
-                
-                if integrity['suspicious'] and not dev_override:
-                    st.error("⚠️ FRAUD ALERT: Location Mismatch. Payout Frozen.")
-                else:
-                    # PROCESS PAYOUT
-                    tx_id = log_transaction(pin, net_pay, "Instant_Rail")
-                    update_cloud_status(pin, "Inactive", 0, 0) # Reset balance to 0
-                    
-                    st.session_state.user_state['earnings'] = 0.0
-                    st.balloons()
-                    st.success(f"Sent ${net_pay:.2f} to Bank Account")
-                    st.caption(f"Transaction ID: {tx_id}")
-                    time.sleep(3)
-                    st.rerun()
-    elif is_active:
-        st.caption("🔒 Funds accumulate while on shift. Clock Out to withdraw.")
-    else:
-        st.caption("Wallet Empty.")
-
-    # C. HISTORY SECTION
-    st.markdown("---")
-    tab1, tab2 = st.tabs(["Shift Logs", "Transaction History"])
+        st.info(f"💰 AVAILABLE: **${net_pay:,.2f}**")
+        st.button("💸 PAYOUT", on_click=cb_payout)
     
-    client = get_db_connection()
-    if client:
-        with tab1:
-            try:
+    if st.session_state.user_state['payout_success']:
+        st.balloons()
+        st.success("FUNDS TRANSFERRED")
+        st.session_state.user_state['payout_success'] = False
+
+    # 5. LOGS
+    with st.expander("Show Logs"):
+        try:
+            client = get_db_connection()
+            if client:
                 sheet = client.open("ec_database").worksheet("history")
                 st.dataframe(pd.DataFrame(sheet.get_all_records()))
-            except: st.write("No Logs")
-        with tab2:
-            try:
-                sheet = client.open("ec_database").worksheet("transactions")
-                st.dataframe(pd.DataFrame(sheet.get_all_records()))
-            except: st.write("No Transactions")
+        except: st.write("No logs")
 
 else:
-    # CFO VIEW
     st.title("🛡️ COMMAND CENTER")
-    if st.button("LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
-    client = get_db_connection()
-    if client:
-        sheet = client.open("ec_database").worksheet("workers")
-        st.dataframe(pd.DataFrame(sheet.get_all_records()))
+    # CFO Logic...
