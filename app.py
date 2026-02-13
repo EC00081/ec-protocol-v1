@@ -12,9 +12,10 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
-# --- CONFIGURATION (TARGET: LUNENBURG, MA) ---
-HOSPITAL_LAT = 42.57381188522667
-HOSPITAL_LON = -71.74726585573194
+# --- CONFIGURATION (TARGET: BROCKTON HOSPITAL) ---
+# Signature Healthcare
+HOSPITAL_LAT = 42.0875
+HOSPITAL_LON = -70.9915
 GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
@@ -39,10 +40,17 @@ if 'user_state' not in st.session_state:
         'earnings': 0.0, 
         'locked': False,
         'payout_success': False,
-        'debug_info': "Initializing..."
+        'debug_info': "Initializing...",
+        'clock_in_ip': None # Stores the Cell Tower IP
     }
 
 # --- BACKEND FUNCTIONS ---
+def get_current_ip():
+    try:
+        # Gets the public IP (Cell Tower or Wifi)
+        return requests.get('https://api.ipify.org', timeout=2).text
+    except: return "Unknown"
+
 def get_cloud_state(pin):
     client = get_db_connection()
     if not client: return {}
@@ -51,7 +59,7 @@ def get_cloud_state(pin):
         records = sheet.get_all_records()
         target_pin = str(pin).strip()
         for row in records:
-            # Fuzzy match PIN column
+            # Fuzzy match PIN
             row_pin = None
             for key in row.keys():
                 if str(key).strip().lower() == 'pin':
@@ -103,9 +111,13 @@ def cb_clock_in():
     st.session_state.user_state['start_time'] = time.time()
     st.session_state.user_state['locked'] = True 
     
+    # Capture Cell Tower IP
+    current_ip = get_current_ip()
+    st.session_state.user_state['clock_in_ip'] = current_ip
+    
     pin = st.session_state.pin
     update_cloud_status(pin, "Active", time.time(), st.session_state.user_state['earnings'])
-    log_history(pin, "CLOCK IN", st.session_state.user_state['earnings'], "User Action")
+    log_history(pin, "CLOCK IN", st.session_state.user_state['earnings'], f"IP: {current_ip}")
 
 def cb_clock_out():
     st.session_state.user_state['active'] = False
@@ -116,7 +128,7 @@ def cb_clock_out():
     log_history(pin, "CLOCK OUT", earnings, "User Action")
 
 def cb_payout():
-    # 🛑 EMPTY VAULT CHECK 🛑
+    # Anti-Fraud Lock
     if st.session_state.user_state['earnings'] <= 0.01:
         return 
 
@@ -173,7 +185,7 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v67.0 | The Glass Vault")
+    st.caption("v68.0 | Field Ready: Brockton")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
