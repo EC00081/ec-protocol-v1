@@ -5,3 +5,4 @@ fpdf
 streamlit-js-eval
 gspread
 oauth2client
+streamlit-autorefresh
