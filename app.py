@@ -13,7 +13,6 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
 # --- CONFIGURATION (TARGET: LUNENBURG, MA) ---
-# 48 Carousel Lane, Lunenburg, MA
 HOSPITAL_LAT = 42.57381188522667
 HOSPITAL_LON = -71.74726585573194
 GEOFENCE_RADIUS = 300 
@@ -39,7 +38,8 @@ if 'user_state' not in st.session_state:
         'start_time': 0.0, 
         'earnings': 0.0, 
         'locked': False,
-        'payout_success': False
+        'payout_success': False,
+        'debug_msg': "Initializing..."
     }
 
 # --- BACKEND FUNCTIONS ---
@@ -49,12 +49,21 @@ def get_cloud_state(pin):
     try:
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
+        
+        # AGGRESSIVE SEARCH
+        # Convert search PIN to string and strip whitespace
+        target_pin = str(pin).strip()
+        
         for row in records:
-            # Safe String Comparison
-            if str(row.get('pin')) == str(pin):
+            # Convert row PIN to string and strip whitespace
+            row_pin = str(row.get('pin')).strip()
+            
+            if row_pin == target_pin:
                 return row
         return {}
-    except: return {}
+    except Exception as e: 
+        st.session_state.user_state['debug_msg'] = f"Read Error: {e}"
+        return {}
 
 def update_cloud_status(pin, status, start_time, earnings):
     client = get_db_connection()
@@ -120,6 +129,24 @@ def cb_payout():
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['payout_success'] = True
 
+def cb_force_sync():
+    # MANUAL SYNC BUTTON LOGIC
+    pin = st.session_state.pin
+    cloud = get_cloud_state(pin)
+    if cloud:
+        status = str(cloud.get('status')).strip()
+        if status == 'Active':
+            st.session_state.user_state['active'] = True
+            try:
+                st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
+                st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
+            except: pass
+        else:
+            st.session_state.user_state['active'] = False
+            try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
+            except: pass
+        st.toast("System Synced with HQ")
+
 # --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
     try:
@@ -140,7 +167,7 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v62.0 | Golden Master")
+    st.caption("v63.0 | Aggressive Sync")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -148,19 +175,9 @@ if 'logged_in_user' not in st.session_state:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
             
-            # INITIAL SYNC (Worker Only)
+            # AUTOMATIC INITIAL SYNC
             if USERS[pin]['role'] != "Exec":
-                cloud = get_cloud_state(pin)
-                if cloud.get('status') == 'Active':
-                    st.session_state.user_state['active'] = True
-                    try:
-                        st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
-                        st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                    except: pass
-                else:
-                    st.session_state.user_state['active'] = False
-                    try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                    except: pass
+                cb_force_sync()
             
             st.rerun()
         else:
@@ -216,6 +233,9 @@ if user['role'] != "Exec":
             st.button("🟢 CLOCK IN", on_click=cb_clock_in)
         else:
             st.error("Cannot Clock In: Outside Geofence")
+            
+    # FORCE SYNC BUTTON (THE FIX)
+    st.button("🔄 Force Cloud Sync", on_click=cb_force_sync, help="Click if status is wrong")
 
     # UI: Wallet
     st.markdown("---")
@@ -224,7 +244,7 @@ if user['role'] != "Exec":
     if not is_active and current_earnings > 0.01:
         st.info(f"💰 PENDING BALANCE: **${net_pay:,.2f}**")
         if st.button("💸 INITIATE PAYOUT", on_click=cb_payout):
-            pass # Logic handled in callback
+            pass 
     elif is_active:
         st.caption("🔒 Funds accumulate while on shift.")
     else:
@@ -235,8 +255,13 @@ if user['role'] != "Exec":
         st.success("FUNDS TRANSFERRED")
         st.session_state.user_state['payout_success'] = False
 
-    # UI: History
-    with st.expander("📜 Transaction Log"):
+    # UI: History & Debug
+    with st.expander("📜 System Logs"):
+        # DEBUG VISION
+        cloud_raw = get_cloud_state(pin)
+        st.write(f"**Cloud Sees:** {cloud_raw.get('status', 'Unknown')}")
+        st.write(f"**App Sees:** {'Active' if is_active else 'Inactive'}")
+        
         try:
             client = get_db_connection()
             if client:
@@ -261,11 +286,10 @@ else:
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # Calculate Total Liability
         total_liability = 0.0
         active_staff = 0
         for row in data:
-            if row.get('status') == 'Active':
+            if str(row.get('status')).strip() == 'Active':
                 active_staff += 1
                 try:
                     start = float(row.get('start_time', 0))
