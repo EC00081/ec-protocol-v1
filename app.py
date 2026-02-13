@@ -12,14 +12,14 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
-# --- CONFIGURATION (YOUR HOUSE) ---
-# 48 Carousel Lane, Lunenburg, MA 01462
-HOSPITAL_LAT = 42.5839
-HOSPITAL_LON = -71.7288
+# --- CONFIGURATION (TARGET: LUNENBURG, MA) ---
+# 48 Carousel Lane, Lunenburg, MA
+HOSPITAL_LAT = 42.57381188522667
+HOSPITAL_LON = -71.74726585573194
 GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
-# ⚡ HEARTBEAT (Keeps the UI alive)
+# ⚡ HEARTBEAT
 count = st_autorefresh(interval=10000, key="pulse")
 
 # --- DATABASE ENGINE ---
@@ -38,7 +38,7 @@ if 'user_state' not in st.session_state:
         'active': False, 
         'start_time': 0.0, 
         'earnings': 0.0, 
-        'locked': False, # UI Lock to prevent double clicks
+        'locked': False,
         'payout_success': False
     }
 
@@ -50,6 +50,7 @@ def get_cloud_state(pin):
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         for row in records:
+            # Safe String Comparison
             if str(row.get('pin')) == str(pin):
                 return row
         return {}
@@ -93,9 +94,8 @@ def log_history(pin, action, amount, note):
 def cb_clock_in():
     st.session_state.user_state['active'] = True
     st.session_state.user_state['start_time'] = time.time()
-    st.session_state.user_state['locked'] = True # Prevent double click
+    st.session_state.user_state['locked'] = True 
     
-    # Cloud Sync
     pin = st.session_state.pin
     update_cloud_status(pin, "Active", time.time(), st.session_state.user_state['earnings'])
     log_history(pin, "CLOCK IN", st.session_state.user_state['earnings'], "User Action")
@@ -103,7 +103,6 @@ def cb_clock_in():
 def cb_clock_out():
     st.session_state.user_state['active'] = False
     
-    # Cloud Sync
     pin = st.session_state.pin
     earnings = st.session_state.user_state['earnings']
     update_cloud_status(pin, "Inactive", 0, earnings)
@@ -141,7 +140,7 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v60.0 | Lunenburg Field Test")
+    st.caption("v62.0 | Golden Master")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -189,7 +188,6 @@ if user['role'] != "Exec":
         dist_msg = f"✅ INSIDE ZONE ({int(dist)}m)" if is_inside else f"🚫 OUTSIDE ZONE ({int(dist)}m)"
     
     st.info(f"📍 GPS: {dist_msg}")
-    st.caption("Target: 48 Carousel Lane, Lunenburg, MA")
 
     # Earnings Calculation
     is_active = st.session_state.user_state['active']
@@ -219,7 +217,7 @@ if user['role'] != "Exec":
         else:
             st.error("Cannot Clock In: Outside Geofence")
 
-    # UI: Wallet (Restored!)
+    # UI: Wallet
     st.markdown("---")
     st.markdown("### 💳 Digital Wallet")
     
@@ -251,7 +249,7 @@ if user['role'] != "Exec":
         st.rerun()
 
 # ==================================================
-# 🏛️ CFO VIEW (PIN 9999) - RESTORED
+# 🏛️ CFO VIEW (PIN 9999)
 # ==================================================
 else:
     st.title("🛡️ COMMAND CENTER")
