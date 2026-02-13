@@ -51,6 +51,7 @@ def get_cloud_state(pin):
         records = sheet.get_all_records()
         target_pin = str(pin).strip()
         for row in records:
+            # Fuzzy match PIN column
             row_pin = None
             for key in row.keys():
                 if str(key).strip().lower() == 'pin':
@@ -59,7 +60,8 @@ def get_cloud_state(pin):
             if row_pin == target_pin:
                 return row
         return {}
-    except: return {}
+    except Exception as e:
+        return {"error": str(e)}
 
 def update_cloud_status(pin, status, start_time, earnings):
     client = get_db_connection()
@@ -95,10 +97,11 @@ def log_history(pin, action, amount, note):
             sheet.append_row([str(pin), action, str(datetime.now()), f"${amount:.2f}", note])
         except: pass
 
-# --- CALLBACKS (THE ANTI-FRAUD LOGIC) ---
+# --- CALLBACKS ---
 def cb_clock_in():
     st.session_state.user_state['active'] = True
     st.session_state.user_state['start_time'] = time.time()
+    st.session_state.user_state['locked'] = True 
     
     pin = st.session_state.pin
     update_cloud_status(pin, "Active", time.time(), st.session_state.user_state['earnings'])
@@ -113,8 +116,7 @@ def cb_clock_out():
     log_history(pin, "CLOCK OUT", earnings, "User Action")
 
 def cb_payout():
-    # 🛑 THE EMPTY VAULT CHECK 🛑
-    # If balance is zero, STOP. This prevents the double-click fraud.
+    # 🛑 EMPTY VAULT CHECK 🛑
     if st.session_state.user_state['earnings'] <= 0.01:
         return 
 
@@ -122,20 +124,19 @@ def cb_payout():
     amount = st.session_state.user_state['earnings']
     taxed_amount = amount * (1 - sum(TAX_RATES.values()))
     
-    # 1. Log Transaction
     log_transaction(pin, taxed_amount)
-    
-    # 2. Clear Balance Immediately (Local)
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['payout_success'] = True
     
-    # 3. Clear Balance (Cloud)
     update_cloud_status(pin, "Inactive", 0, 0)
     log_history(pin, "PAYOUT", taxed_amount, "Settled")
 
 def cb_force_sync():
     pin = st.session_state.pin
     cloud = get_cloud_state(pin)
+    
+    st.session_state.user_state['debug_info'] = f"Found Cloud Data: {cloud}"
+    
     if cloud:
         status_val = str(cloud.get('status', '')).strip().lower()
         if status_val == 'active':
@@ -149,6 +150,8 @@ def cb_force_sync():
             try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
             except: pass
         st.toast("Synced.")
+    else:
+        st.toast("User Not Found in DB")
 
 # --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
@@ -170,7 +173,7 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v66.0 | Final Polish")
+    st.caption("v67.0 | The Glass Vault")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -196,7 +199,7 @@ pin = st.session_state.pin
 if user['role'] != "Exec":
     st.title(f"👤 {user['name']}")
     
-    # GPS Logic
+    # GPS
     loc = get_geolocation()
     dist_msg = "Triangulating..."
     is_inside = False
@@ -221,7 +224,7 @@ if user['role'] != "Exec":
     
     net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
 
-    # Shift Controls
+    # Controls
     st.markdown("### ⏱️ Shift Controls")
     c1, c2 = st.columns(2)
     c1.metric("GROSS", f"${current_earnings:,.2f}")
@@ -239,7 +242,7 @@ if user['role'] != "Exec":
             
     st.button("🔄 Force Cloud Sync", on_click=cb_force_sync)
 
-    # Wallet & Transactions
+    # Wallet
     st.markdown("---")
     st.markdown("### 💳 Digital Wallet")
     
@@ -257,30 +260,29 @@ if user['role'] != "Exec":
         st.success("FUNDS TRANSFERRED")
         st.session_state.user_state['payout_success'] = False
 
-    # NEW: Dedicated History Section
-    st.markdown("### 🏦 Transaction History")
+    # 1. TRANSACTION LOG (The Money)
+    st.markdown("### 🏦 Payouts (Bank Log)")
     try:
         client = get_db_connection()
         if client:
             sheet = client.open("ec_database").worksheet("transactions")
-            # Get all records
             data = sheet.get_all_records()
-            # Filter for CURRENT USER only
-            df = pd.DataFrame(data)
-            # Safe filter (convert column to string just in case)
-            if not df.empty:
-                # Assuming 'pin' is one of the columns
-                # We'll try to find the PIN column loosely
-                pin_col = next((col for col in df.columns if str(col).lower().strip() == 'pin'), None)
-                if pin_col:
-                    my_txs = df[df[pin_col].astype(str) == str(pin)]
-                    st.dataframe(my_txs)
-                else:
-                    st.dataframe(df) # Fallback
-            else:
-                st.info("No transactions found.")
-    except Exception as e: st.write("No Transaction Data Available")
+            st.dataframe(pd.DataFrame(data))
+    except: st.write("No Transactions Yet")
 
+    # 2. SYSTEM DIAGNOSTICS (The Truth Box)
+    st.markdown("---")
+    with st.expander("🛠️ System Diagnostics (Action Log)"):
+        st.write(f"**Raw Debug Info:** {st.session_state.user_state['debug_info']}")
+        
+        st.write("**Shift History (Clock In/Out):**")
+        try:
+            client = get_db_connection()
+            if client:
+                sheet = client.open("ec_database").worksheet("history")
+                st.dataframe(pd.DataFrame(sheet.get_all_records()))
+        except: st.write("No History Yet")
+        
     if st.button("LOGOUT"):
         st.session_state.clear()
         st.rerun()
