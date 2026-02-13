@@ -39,10 +39,10 @@ if 'user_state' not in st.session_state:
         'earnings': 0.0, 
         'locked': False,
         'payout_success': False,
-        'debug_log': []
+        'debug_info': "Initializing..."
     }
 
-# --- BACKEND FUNCTIONS ---
+# --- BACKEND FUNCTIONS (ROBUST READ) ---
 def get_cloud_state(pin):
     client = get_db_connection()
     if not client: return {}
@@ -50,29 +50,29 @@ def get_cloud_state(pin):
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         
-        # AGGRESSIVE SEARCH (String Casting)
-        target = str(pin).strip()
+        target_pin = str(pin).strip()
         
         for row in records:
-            # We assume the PIN is in the first column or named 'pin'
-            # Let's try to get 'pin' safely
-            row_pin = str(row.get('pin', '')).strip()
+            # Handle potential header casing issues (pin vs PIN)
+            # We try to grab the value from whatever key looks like 'pin'
+            row_pin = None
+            for key in row.keys():
+                if str(key).strip().lower() == 'pin':
+                    row_pin = str(row[key]).strip()
+                    break
             
-            # Debug log to see what we are comparing
-            # st.session_state.user_state['debug_log'].append(f"Comparing {target} vs {row_pin}")
-            
-            if row_pin == target:
+            if row_pin == target_pin:
                 return row
+                
         return {}
-    except Exception as e: 
-        return {}
+    except Exception as e:
+        return {"error": str(e)}
 
 def update_cloud_status(pin, status, start_time, earnings):
     client = get_db_connection()
     if client:
         try:
             sheet = client.open("ec_database").worksheet("workers")
-            # Find cell by PIN string
             try:
                 cell = sheet.find(str(pin))
                 row = cell.row
@@ -132,33 +132,30 @@ def cb_payout():
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['payout_success'] = True
 
-# --- SYNC LOGIC (The "Mirror") ---
-def restore_session_from_cloud(pin):
-    """
-    Force the app to look like the database.
-    This runs on Login and on 'Force Sync'.
-    """
+def cb_force_sync():
+    pin = st.session_state.pin
     cloud = get_cloud_state(pin)
+    
+    # Debugging the pull
+    st.session_state.user_state['debug_info'] = f"Raw Cloud Data: {cloud}"
+    
     if cloud:
-        status = str(cloud.get('status', '')).strip()
+        # Case-insensitive check for 'Active'
+        status_val = str(cloud.get('status', '')).strip().lower()
         
-        if status == 'Active':
+        if status_val == 'active':
             st.session_state.user_state['active'] = True
             try:
-                # CRITICAL: RESTORE TIME SO MONEY COUNTS CORRECTLY
                 st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
-                # Restore previous earnings (if any)
                 st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-            except: 
-                # Fallback if data is corrupt
-                st.session_state.user_state['start_time'] = time.time()
+            except: pass
         else:
             st.session_state.user_state['active'] = False
             try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
             except: pass
-            
-        return True
-    return False
+        st.toast("Synced.")
+    else:
+        st.toast("Sync Failed: User not found in Cloud.")
 
 # --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
@@ -180,7 +177,7 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v64.0 | The Mirror Protocol")
+    st.caption("v65.0 | Fuzzy Logic")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -188,13 +185,9 @@ if 'logged_in_user' not in st.session_state:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
             
-            # AUTOMATIC RESTORE
+            # AUTO SYNC
             if USERS[pin]['role'] != "Exec":
-                restored = restore_session_from_cloud(pin)
-                if restored:
-                    st.toast("✅ Session Restored from HQ")
-                else:
-                    st.toast("⚠️ New Session (No Cloud Data Found)")
+                cb_force_sync()
             
             st.rerun()
         else:
@@ -223,32 +216,27 @@ if user['role'] != "Exec":
     
     st.info(f"📍 GPS: {dist_msg}")
 
-    # Earnings Calculation
+    # Earnings
     is_active = st.session_state.user_state['active']
     current_earnings = st.session_state.user_state['earnings']
     
-    # REAL-TIME CALCULATION
-    # If active, we recalculate earnings based on NOW - START TIME
     if is_active:
         start = st.session_state.user_state['start_time']
         if start > 0:
             elapsed_hours = (time.time() - start) / 3600
-            # Total = Previously Saved + Current Session
-            # Note: simplified for this demo to just be Session based on start time
             current_earnings = elapsed_hours * user['rate']
-            # We update session state so it displays correctly
             st.session_state.user_state['earnings'] = current_earnings
     
     net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
 
-    # Shift Controls
+    # Controls
     st.markdown("### ⏱️ Shift Controls")
     c1, c2 = st.columns(2)
     c1.metric("GROSS", f"${current_earnings:,.2f}")
     c2.metric("NET", f"${net_pay:,.2f}")
 
     if is_active:
-        st.success("🟢 ON SHIFT (Cloud Verified)")
+        st.success("🟢 ON SHIFT")
         st.button("🔴 CLOCK OUT", on_click=cb_clock_out)
     else:
         st.warning("⚪ OFF DUTY")
@@ -257,12 +245,10 @@ if user['role'] != "Exec":
         else:
             st.error("Cannot Clock In: Outside Geofence")
             
-    # FORCE SYNC
-    if st.button("🔄 Force Cloud Sync"):
-        restore_session_from_cloud(pin)
-        st.rerun()
+    # Force Sync
+    st.button("🔄 Force Cloud Sync", on_click=cb_force_sync)
 
-    # UI: Wallet
+    # Wallet
     st.markdown("---")
     st.markdown("### 💳 Digital Wallet")
     
@@ -283,35 +269,17 @@ if user['role'] != "Exec":
     # THE TRUTH BOX (DEBUG)
     st.markdown("---")
     with st.expander("🛠️ System Diagnostics (The Truth Box)"):
-        st.write("This panel shows exactly what the database sees.")
+        st.write("This is what the app found when it searched for you:")
+        st.code(st.session_state.user_state['debug_info'])
         
-        # Fetch fresh raw data
-        raw_cloud = get_cloud_state(pin)
-        
-        c1, c2 = st.columns(2)
-        c1.write("**App State:**")
-        c1.write(f"Active: {is_active}")
-        c1.write(f"Start Time: {st.session_state.user_state['start_time']}")
-        
-        c2.write("**Cloud State:**")
-        c2.write(f"Active: {raw_cloud.get('status', 'Not Found')}")
-        c2.write(f"Start Time: {raw_cloud.get('start_time', 'N/A')}")
-        
-        if raw_cloud.get('status') == 'Active' and not is_active:
-            st.error("MISMATCH DETECTED: Cloud says Active, App says Inactive.")
-            st.write("👉 Click 'Force Cloud Sync' above to fix.")
-        elif raw_cloud.get('status') != 'Active' and is_active:
-             st.error("MISMATCH DETECTED: App says Active, Cloud says Inactive.")
-        else:
-            st.success("✅ SYNC OK: App and Cloud agree.")
-            
-        # History Log
+        st.write("---")
+        st.write("Live Database Records:")
         try:
             client = get_db_connection()
             if client:
-                sheet = client.open("ec_database").worksheet("history")
+                sheet = client.open("ec_database").worksheet("workers")
                 st.dataframe(pd.DataFrame(sheet.get_all_records()))
-        except: st.write("No Logs")
+        except Exception as e: st.write(f"DB Error: {e}")
         
     if st.button("LOGOUT"):
         st.session_state.clear()
@@ -332,7 +300,8 @@ else:
         total_liability = 0.0
         active_staff = 0
         for row in data:
-            if str(row.get('status')).strip() == 'Active':
+            status_val = str(row.get('status', '')).strip().lower()
+            if status_val == 'active':
                 active_staff += 1
                 try:
                     start = float(row.get('start_time', 0))
