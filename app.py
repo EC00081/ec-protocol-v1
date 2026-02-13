@@ -12,14 +12,13 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
 
-# --- CONFIGURATION (TARGET LOCATION) ---
-# Updated Exact Coordinates
+# --- CONFIGURATION (TARGET: LUNENBURG, MA) ---
 HOSPITAL_LAT = 42.57381188522667
 HOSPITAL_LON = -71.74726585573194
 GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
-# ⚡ HEARTBEAT (Keeps the UI alive)
+# ⚡ HEARTBEAT
 count = st_autorefresh(interval=10000, key="pulse")
 
 # --- DATABASE ENGINE ---
@@ -38,7 +37,7 @@ if 'user_state' not in st.session_state:
         'active': False, 
         'start_time': 0.0, 
         'earnings': 0.0, 
-        'locked': False, # UI Lock to prevent double clicks
+        'locked': False,
         'payout_success': False
     }
 
@@ -50,4 +49,14 @@ def get_cloud_state(pin):
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         for row in records:
-            if str(row.
+            # FIX: Broken apart for safety
+            row_pin = str(row.get('pin'))
+            user_pin = str(pin)
+            if row_pin == user_pin:
+                return row
+        return {}
+    except: return {}
+
+def update_cloud_status(pin, status, start_time, earnings):
+    client = get_db_connection()
+    if client
