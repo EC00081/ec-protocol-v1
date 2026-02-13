@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 import math
-import hashlib
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
 import gspread
@@ -18,7 +17,7 @@ GEOFENCE_RADIUS = 300
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
 # ⚡ HEARTBEAT
-count = st_autorefresh(interval=5000, key="system_pulse")
+count = st_autorefresh(interval=5000, key="pulse")
 
 # --- DATABASE ENGINE ---
 def get_db_connection():
@@ -30,20 +29,20 @@ def get_db_connection():
         return client
     except: return None
 
-# WORKER FUNCTIONS
-def get_worker_status(pin):
+# --- WORKER FUNCTIONS ---
+def get_worker_status_from_cloud(pin):
     client = get_db_connection()
-    if not client: return None, None
+    if not client: return None
     try:
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
-        for i, row in enumerate(records):
+        for row in records:
             if str(row.get('pin')) == str(pin):
-                return row, i + 2
-        return None, None
-    except: return None, None
+                return row # Returns the whole dictionary {status: Active, start: ...}
+        return None
+    except: return None
 
-def update_status_tab(pin, status, start_time, earnings):
+def update_cloud_status(pin, status, start_time, earnings):
     client = get_db_connection()
     if client:
         try:
@@ -52,11 +51,11 @@ def update_status_tab(pin, status, start_time, earnings):
                 cell = sheet.find(str(pin))
                 row = cell.row
                 sheet.update_cell(row, 2, status)
-                sheet.update_cell(row, 3, start_time)
-                sheet.update_cell(row, 4, earnings)
+                sheet.update_cell(row, 3, str(start_time))
+                sheet.update_cell(row, 4, str(earnings))
                 sheet.update_cell(row, 5, str(datetime.now()))
             except:
-                sheet.append_row([str(pin), status, start_time, earnings, str(datetime.now())])
+                sheet.append_row([str(pin), status, str(start_time), str(earnings), str(datetime.now())])
         except: pass
 
 def log_to_ledger(pin, action, earnings, gps_msg):
@@ -67,16 +66,13 @@ def log_to_ledger(pin, action, earnings, gps_msg):
             sheet.append_row([str(pin), action, str(datetime.now()), f"${earnings:.2f}", gps_msg])
         except: pass
 
-# CFO FUNCTIONS
-def get_all_active_workers():
+# --- CFO FUNCTIONS ---
+def get_all_workers():
     client = get_db_connection()
     if not client: return []
     try:
         sheet = client.open("ec_database").worksheet("workers")
-        data = sheet.get_all_records()
-        # Filter for ONLY Active workers
-        active = [d for d in data if d.get('status') == 'Active']
-        return active
+        return sheet.get_all_records()
     except: return []
 
 # --- MATH ---
@@ -94,17 +90,17 @@ def calculate_taxes(gross):
 
 # --- STATE ---
 if 'user_state' not in st.session_state: 
-    st.session_state.user_state = {'active': False, 'start_time': None, 'earnings': 0.0}
+    st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "RT", "rate": 85.00},
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- LOGIN ---
+# --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v50.0 | The Watchtower")
+    st.caption("v51.0 | Cloud State Restoration")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
@@ -112,13 +108,26 @@ if 'logged_in_user' not in st.session_state:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
             
-            # Sync Logic (Worker Only)
+            # 🔴 THE FIX: CHECK CLOUD IMMEDIATELY ON LOGIN
             if USERS[pin]['role'] != "Exec":
-                row_data, _ = get_worker_status(pin)
-                if row_data:
-                    st.session_state.user_state['active'] = (row_data['status'] == 'Active')
-                    st.session_state.user_state['start_time'] = float(row_data['start_time']) if row_data['start_time'] else 0.0
-                    st.session_state.user_state['earnings'] = float(row_data['earnings']) if row_data['earnings'] else 0.0
+                cloud_data = get_worker_status_from_cloud(pin)
+                if cloud_data:
+                    # If Cloud says Active, WE are Active.
+                    if cloud_data.get('status') == 'Active':
+                        st.session_state.user_state['active'] = True
+                        # Parse Floats Safely
+                        try:
+                            st.session_state.user_state['start_time'] = float(cloud_data.get('start_time', 0))
+                            st.session_state.user_state['earnings'] = float(cloud_data.get('earnings', 0))
+                            st.toast("🔄 Session Restored from Cloud")
+                        except:
+                            st.session_state.user_state['start_time'] = time.time()
+                    else:
+                        st.session_state.user_state['active'] = False
+                        try:
+                            st.session_state.user_state['earnings'] = float(cloud_data.get('earnings', 0))
+                        except: pass
+            
             st.rerun()
         else:
             st.error("INVALID PIN")
@@ -133,35 +142,36 @@ pin = st.session_state.pin
 # ==================================================
 if user['role'] == "Exec":
     st.title("🛡️ COMMAND CENTER")
-    st.caption("Live Protocol Oversight")
     
-    # 1. FETCH LIVE DATA
-    active_workers = get_all_active_workers()
+    # 1. FETCH ALL DATA
+    all_workers = get_all_workers()
+    active_workers = [w for w in all_workers if w.get('status') == 'Active']
     
-    # Calculate Real-Time Liability
+    # 2. CALCULATE LIABILITY
     total_liability = 0.0
     active_count = len(active_workers)
     
     for w in active_workers:
-        # Calculate their current earnings (Saved + Session)
         try:
-            start = float(w['start_time'])
-            saved = float(w['earnings'])
-            # Since they are active, add current session time
-            current_session = ((time.time() - start) / 3600) * 85.00 # Assuming base rate for now
-            total_liability += (saved + current_session)
+            # Get User Rate (In real app, fetch from DB. Here we assume 85.00 for demo)
+            rate = 85.00 
+            start = float(w.get('start_time', 0))
+            saved = float(w.get('earnings', 0))
+            
+            if start > 0:
+                current_session = ((time.time() - start) / 3600) * rate
+                total_liability += (saved + current_session)
         except: pass
 
-    # 2. METRICS
+    # 3. METRICS
     c1, c2, c3 = st.columns(3)
-    c1.metric("ACTIVE STAFF", f"{active_count}", delta="Live")
-    c2.metric("CURRENT LIABILITY", f"${total_liability:,.2f}", delta="Pending Payout")
-    c3.metric("PROTOCOL STATUS", "ONLINE", delta="Stable", delta_color="normal")
+    c1.metric("ACTIVE STAFF", f"{active_count}")
+    c2.metric("CURRENT LIABILITY", f"${total_liability:,.2f}")
+    c3.metric("SYSTEM", "ONLINE", delta_color="normal")
     
-    # 3. LIVE MAP
+    # 4. MAP & ROSTER
     st.markdown("### 📍 LIVE ASSET MAP")
     if active_count > 0:
-        # In a real app, we'd pull their lat/lon. For now, we plot them at hospital
         map_data = pd.DataFrame({
             'lat': [HOSPITAL_LAT],
             'lon': [HOSPITAL_LON]
@@ -169,8 +179,7 @@ if user['role'] == "Exec":
         st.map(map_data, zoom=15)
         st.dataframe(pd.DataFrame(active_workers))
     else:
-        st.info("No Active Personnel on Site.")
-        st.map(pd.DataFrame({'lat': [HOSPITAL_LAT], 'lon': [HOSPITAL_LON]}), zoom=15)
+        st.info("No Active Personnel.")
 
     if st.button("LOGOUT"):
         st.session_state.clear()
@@ -217,30 +226,17 @@ else:
             if is_inside:
                 st.session_state.user_state['active'] = True
                 st.session_state.user_state['start_time'] = time.time()
-                update_status_tab(pin, "Active", time.time(), current_earnings)
+                update_cloud_status(pin, "Active", time.time(), current_earnings)
                 log_to_ledger(pin, "CLOCK IN", current_earnings, dist_msg)
                 st.success("STARTED")
-                st.rerun()
+                time.sleep(1); st.rerun()
             else:
                 st.error("Outside Zone")
     else:
         if st.button("🔴 CLOCK OUT"):
             st.session_state.user_state['active'] = False
             st.session_state.user_state['earnings'] = current_earnings
-            update_status_tab(pin, "Inactive", 0, current_earnings)
+            update_cloud_status(pin, "Inactive", 0, current_earnings)
             log_to_ledger(pin, "CLOCK OUT", current_earnings, dist_msg)
             st.success("ENDED & LOGGED")
-            st.rerun()
-            
-    # History
-    st.markdown("---")
-    with st.expander("📜 View Shift History"):
-        try:
-            client = get_db_connection()
-            if client:
-                sheet = client.open("ec_database").worksheet("history")
-                data = sheet.get_all_records()
-                df = pd.DataFrame(data)
-                my_history = df[df['pin'].astype(str) == str(pin)]
-                st.dataframe(my_history)
-        except: st.caption("No history found.")
+            time.sleep(1); st.rerun()
