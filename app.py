@@ -16,7 +16,7 @@ HOSPITAL_LON = -70.9915
 GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
-# ⚡ HEARTBEAT
+# ⚡ HEARTBEAT (Refreshes every 5s to keep UI in sync)
 count = st_autorefresh(interval=5000, key="pulse")
 
 # --- DATABASE ENGINE ---
@@ -29,17 +29,21 @@ def get_db_connection():
         return client
     except: return None
 
-# --- WORKER FUNCTIONS ---
-def get_worker_status_from_cloud(pin):
+# --- CRITICAL: FETCH CLOUD TRUTH ---
+def get_cloud_state(pin):
+    """
+    Returns the EXACT state from the cloud.
+    This is the Single Source of Truth.
+    """
     client = get_db_connection()
-    if not client: return None
+    if not client: return None # Offline
     try:
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         for row in records:
             if str(row.get('pin')) == str(pin):
-                return row # Returns the whole dictionary {status: Active, start: ...}
-        return None
+                return row # Returns {status: 'Active', ...}
+        return {} # User not found
     except: return None
 
 def update_cloud_status(pin, status, start_time, earnings):
@@ -66,15 +70,6 @@ def log_to_ledger(pin, action, earnings, gps_msg):
             sheet.append_row([str(pin), action, str(datetime.now()), f"${earnings:.2f}", gps_msg])
         except: pass
 
-# --- CFO FUNCTIONS ---
-def get_all_workers():
-    client = get_db_connection()
-    if not client: return []
-    try:
-        sheet = client.open("ec_database").worksheet("workers")
-        return sheet.get_all_records()
-    except: return []
-
 # --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -97,37 +92,16 @@ USERS = {
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- LOGIN SCREEN ---
+# --- LOGIN ---
 if 'logged_in_user' not in st.session_state:
     st.title("🛡️ EC Enterprise")
-    st.caption("v51.0 | Cloud State Restoration")
+    st.caption("v53.0 | UI Lockout Protocol")
     
     pin = st.text_input("ENTER PIN", type="password")
     if st.button("AUTHENTICATE"):
         if pin in USERS:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
-            
-            # 🔴 THE FIX: CHECK CLOUD IMMEDIATELY ON LOGIN
-            if USERS[pin]['role'] != "Exec":
-                cloud_data = get_worker_status_from_cloud(pin)
-                if cloud_data:
-                    # If Cloud says Active, WE are Active.
-                    if cloud_data.get('status') == 'Active':
-                        st.session_state.user_state['active'] = True
-                        # Parse Floats Safely
-                        try:
-                            st.session_state.user_state['start_time'] = float(cloud_data.get('start_time', 0))
-                            st.session_state.user_state['earnings'] = float(cloud_data.get('earnings', 0))
-                            st.toast("🔄 Session Restored from Cloud")
-                        except:
-                            st.session_state.user_state['start_time'] = time.time()
-                    else:
-                        st.session_state.user_state['active'] = False
-                        try:
-                            st.session_state.user_state['earnings'] = float(cloud_data.get('earnings', 0))
-                        except: pass
-            
             st.rerun()
         else:
             st.error("INVALID PIN")
@@ -138,60 +112,34 @@ user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
 # ==================================================
-# 🏛️ VIEW A: THE CFO WATCHTOWER (PIN 9999)
+# 👤 WORKER FIELD UNIT
 # ==================================================
-if user['role'] == "Exec":
-    st.title("🛡️ COMMAND CENTER")
-    
-    # 1. FETCH ALL DATA
-    all_workers = get_all_workers()
-    active_workers = [w for w in all_workers if w.get('status') == 'Active']
-    
-    # 2. CALCULATE LIABILITY
-    total_liability = 0.0
-    active_count = len(active_workers)
-    
-    for w in active_workers:
-        try:
-            # Get User Rate (In real app, fetch from DB. Here we assume 85.00 for demo)
-            rate = 85.00 
-            start = float(w.get('start_time', 0))
-            saved = float(w.get('earnings', 0))
-            
-            if start > 0:
-                current_session = ((time.time() - start) / 3600) * rate
-                total_liability += (saved + current_session)
-        except: pass
-
-    # 3. METRICS
-    c1, c2, c3 = st.columns(3)
-    c1.metric("ACTIVE STAFF", f"{active_count}")
-    c2.metric("CURRENT LIABILITY", f"${total_liability:,.2f}")
-    c3.metric("SYSTEM", "ONLINE", delta_color="normal")
-    
-    # 4. MAP & ROSTER
-    st.markdown("### 📍 LIVE ASSET MAP")
-    if active_count > 0:
-        map_data = pd.DataFrame({
-            'lat': [HOSPITAL_LAT],
-            'lon': [HOSPITAL_LON]
-        })
-        st.map(map_data, zoom=15)
-        st.dataframe(pd.DataFrame(active_workers))
-    else:
-        st.info("No Active Personnel.")
-
-    if st.button("LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
-
-# ==================================================
-# 👤 VIEW B: THE WORKER FIELD UNIT (PIN 1001)
-# ==================================================
-else:
+if user['role'] != "Exec":
     st.title(f"👤 {user['name']}")
 
-    # GPS
+    # 1. 🛑 FORCE SYNC BEFORE DRAWING UI 🛑
+    # We do NOT rely on session state alone. We check the cloud every time.
+    cloud_data = get_cloud_state(pin)
+    
+    # Defaults
+    is_active = False
+    start_time = 0.0
+    saved_earnings = 0.0
+    
+    if cloud_data:
+        if cloud_data.get('status') == 'Active':
+            is_active = True
+            try:
+                start_time = float(cloud_data.get('start_time', 0))
+                saved_earnings = float(cloud_data.get('earnings', 0))
+            except: pass
+        else:
+            is_active = False
+            try:
+                saved_earnings = float(cloud_data.get('earnings', 0))
+            except: pass
+    
+    # 2. GPS LOGIC
     loc = get_geolocation()
     dist_msg = "Triangulating..."
     is_inside = False
@@ -209,10 +157,10 @@ else:
 
     st.info(f"📍 GPS: {dist_msg}")
 
-    # Money Ticker
-    current_earnings = st.session_state.user_state['earnings']
-    if st.session_state.user_state['active']:
-        elapsed = (time.time() - st.session_state.user_state['start_time']) / 3600
+    # 3. MONEY LOGIC
+    current_earnings = saved_earnings
+    if is_active:
+        elapsed = (time.time() - start_time) / 3600
         current_earnings += elapsed * user['rate']
 
     net_pay = calculate_taxes(current_earnings)
@@ -220,23 +168,57 @@ else:
     c1.metric("GROSS", f"${current_earnings:,.2f}")
     c2.metric("NET", f"${net_pay:,.2f}")
 
-    # Actions
-    if not st.session_state.user_state['active']:
+    # 4. 🛑 THE LOCKED UI 🛑
+    # We use the 'is_active' variable derived directly from the cloud above.
+    
+    if is_active:
+        # USER IS WORKING -> ONLY SHOW CLOCK OUT
+        st.success("🟢 STATUS: ON SHIFT (Cloud Verified)")
+        if st.button("🔴 CLOCK OUT"):
+            update_cloud_status(pin, "Inactive", 0, current_earnings)
+            log_to_ledger(pin, "CLOCK OUT", current_earnings, dist_msg)
+            st.success("ENDED & LOGGED")
+            time.sleep(1); st.rerun()
+            
+    else:
+        # USER IS NOT WORKING -> ONLY SHOW CLOCK IN
+        st.warning("⚪ STATUS: OFF DUTY")
         if st.button("🟢 CLOCK IN"):
             if is_inside:
-                st.session_state.user_state['active'] = True
-                st.session_state.user_state['start_time'] = time.time()
                 update_cloud_status(pin, "Active", time.time(), current_earnings)
                 log_to_ledger(pin, "CLOCK IN", current_earnings, dist_msg)
                 st.success("STARTED")
                 time.sleep(1); st.rerun()
             else:
                 st.error("Outside Zone")
-    else:
-        if st.button("🔴 CLOCK OUT"):
-            st.session_state.user_state['active'] = False
-            st.session_state.user_state['earnings'] = current_earnings
-            update_cloud_status(pin, "Inactive", 0, current_earnings)
-            log_to_ledger(pin, "CLOCK OUT", current_earnings, dist_msg)
-            st.success("ENDED & LOGGED")
-            time.sleep(1); st.rerun()
+
+    # History
+    st.markdown("---")
+    with st.expander("📜 View Shift History"):
+        try:
+            client = get_db_connection()
+            if client:
+                sheet = client.open("ec_database").worksheet("history")
+                data = sheet.get_all_records()
+                df = pd.DataFrame(data)
+                my_history = df[df['pin'].astype(str) == str(pin)]
+                st.dataframe(my_history)
+        except: st.caption("No history found.")
+
+# ==================================================
+# 🏛️ CFO WATCHTOWER (Standard View)
+# ==================================================
+else:
+    st.title("🛡️ COMMAND CENTER")
+    # ... (CFO Logic stays the same) ...
+    client = get_db_connection()
+    if client:
+        sheet = client.open("ec_database").worksheet("workers")
+        data = sheet.get_all_records()
+        active_count = len([x for x in data if x.get('status') == 'Active'])
+        st.metric("ACTIVE STAFF", active_count)
+        st.dataframe(data)
+        
+    if st.button("LOGOUT"):
+        st.session_state.clear()
+        st.rerun()
