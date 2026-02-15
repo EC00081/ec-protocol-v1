@@ -4,7 +4,7 @@ import time
 import math
 import hashlib
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_js_eval import get_geolocation
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -49,10 +49,6 @@ st.markdown("""
         border-radius: 16px;
         box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
         transition: transform 0.2s;
-    }
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-2px);
-        background: rgba(255, 255, 255, 0.05);
     }
     
     /* STATUS PILLS */
@@ -106,13 +102,6 @@ st.markdown("""
         margin-bottom: 30px;
         border-bottom: 1px solid rgba(255,255,255,0.1);
     }
-    
-    /* DATA TABLES */
-    div[data-testid="stDataFrame"] {
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 12px;
-        overflow: hidden;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -135,7 +124,8 @@ def get_db_connection():
         return client
     except: return None
 
-# --- STATE MANAGEMENT ---
+# --- STATE MANAGEMENT (FIXED) ---
+# Auto-repair session state if keys are missing
 if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
         'active': False, 
@@ -203,6 +193,15 @@ def log_history(pin, action, amount, note):
             sheet.append_row([str(pin), action, str(datetime.now()), f"${amount:.2f}", note])
         except: pass
 
+def log_schedule(pin, date, start, end):
+    client = get_db_connection()
+    if client:
+        try:
+            sheet = client.open("ec_database").worksheet("schedule")
+            sheet.append_row([str(pin), str(date), str(start), str(end), "Scheduled"])
+            return True
+        except: return False
+
 # --- CALLBACKS ---
 def cb_clock_in():
     st.session_state.user_state['active'] = True
@@ -267,6 +266,7 @@ def get_distance(lat1, lon1, lat2, lon2):
 
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "RT", "rate": 85.00},
+    "1002": {"name": "Charles Morgan", "role": "RN", "rate": 90.00},
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
@@ -308,98 +308,126 @@ if user['role'] != "Exec":
         </div>
     """, unsafe_allow_html=True)
     
-    # 2. LIVE GPS STREAM
-    loc = get_geolocation(component_key=f"gps_{count}")
-    current_ip = get_current_ip()
-    
-    dist_msg = "ACQUIRING SATELLITE..."
-    pill_class = "status-neutral"
-    is_inside = False
-    
-    # DEV CONTROL IN SIDEBAR
-    with st.sidebar:
-        st.caption("DEVELOPER TOOLS")
-        dev_override = st.checkbox("FORCE GPS OVERRIDE (VIRTUAL)")
-    
-    if loc:
-        dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
-        is_inside = dist < GEOFENCE_RADIUS or dev_override
+    # 2. TABS (MAIN, SCHEDULE, LOGS)
+    tab_main, tab_schedule, tab_logs = st.tabs(["MAIN CONTROL", "SCHEDULE", "LOGS"])
+
+    with tab_main:
+        # LIVE GPS STREAM
+        loc = get_geolocation(component_key=f"gps_{count}")
+        current_ip = get_current_ip()
         
-        if is_inside:
-            if dev_override:
-                dist_msg = "✅ VIRTUAL ZONE ACTIVE"
+        dist_msg = "ACQUIRING SATELLITE..."
+        pill_class = "status-neutral"
+        is_inside = False
+        
+        # DEV CONTROL
+        with st.sidebar:
+            st.caption("DEVELOPER TOOLS")
+            dev_override = st.checkbox("FORCE GPS OVERRIDE (VIRTUAL)")
+        
+        if loc:
+            dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
+            is_inside = dist < GEOFENCE_RADIUS or dev_override
+            
+            if is_inside:
+                if dev_override:
+                    dist_msg = "✅ VIRTUAL ZONE ACTIVE"
+                else:
+                    dist_msg = f"✅ SECURE ZONE • {int(dist)}m"
+                pill_class = "safe-mode"
             else:
-                dist_msg = f"✅ SECURE ZONE • {int(dist)}m"
-            pill_class = "safe-mode"
+                dist_msg = f"🚫 OUTSIDE PERIMETER • {int(dist)}m"
+                pill_class = "danger-mode"
+                
+            if st.session_state.user_state['active'] and not is_inside:
+                cb_clock_out()
+                st.error("⚠️ GEOFENCE BREACH - PROTOCOL HALTED")
+                st.rerun()
+
+        st.markdown(f'<div class="status-pill {pill_class}">{dist_msg}</div>', unsafe_allow_html=True)
+
+        # EARNINGS
+        if not st.session_state.user_state['data_loaded']:
+            with st.spinner("Decrypting Financial Data..."):
+                cb_force_sync()
+
+        is_active = st.session_state.user_state['active']
+        current_earnings = st.session_state.user_state['earnings']
+        
+        if is_active:
+            start = st.session_state.user_state['start_time']
+            if start > 0:
+                elapsed_hours = (time.time() - start) / 3600
+                current_earnings = elapsed_hours * user['rate']
+                st.session_state.user_state['earnings'] = current_earnings
+        
+        net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
+
+        # MONEY CARDS
+        c1, c2 = st.columns(2)
+        c1.metric("GROSS ACCRUAL", f"${current_earnings:,.2f}", delta="Live" if is_active else None)
+        c2.metric("NET PAYABLE", f"${net_pay:,.2f}", delta="Ready" if not is_active and net_pay > 0 else None)
+
+        # CONTROLS
+        st.markdown("###") # Spacer
+        if is_active:
+            st.button("🔴 TERMINATE SESSION", on_click=cb_clock_out, use_container_width=True)
         else:
-            dist_msg = f"🚫 OUTSIDE PERIMETER • {int(dist)}m"
-            pill_class = "danger-mode"
-            
-        if st.session_state.user_state['active'] and not is_inside:
-            cb_clock_out()
-            st.error("⚠️ GEOFENCE BREACH - PROTOCOL HALTED")
-            st.rerun()
+            if is_inside:
+                st.button("🟢 INITIALIZE PROTOCOL", on_click=cb_clock_in, use_container_width=True)
+            else:
+                st.info("📍 ENTER HOSPITAL ZONE TO BEGIN")
+                
+        # WALLET
+        st.markdown("###")
+        if not is_active and current_earnings > 0.01:
+            st.info(f"💰 LIQUIDITY AVAILABLE: **${net_pay:,.2f}**")
+            st.button("💸 EXECUTE TRANSFER", on_click=cb_payout, use_container_width=True)
 
-    st.markdown(f'''
-        <div class="status-pill {pill_class}">
-            {dist_msg}
-        </div>
-    ''', unsafe_allow_html=True)
+        if st.session_state.user_state.get('payout_success'):
+            st.balloons()
+            st.success("ASSETS TRANSFERRED TO BANK")
+            st.session_state.user_state['payout_success'] = False
 
-    # 3. EARNINGS
-    if not st.session_state.user_state['data_loaded']:
-        with st.spinner("Decrypting Financial Data..."):
-            cb_force_sync()
+    with tab_schedule:
+        st.markdown("### 📅 Rolling Schedule")
+        
+        # Add Shift Form
+        with st.expander("➕ Add New Shift"):
+            with st.form("add_shift_form"):
+                d = st.date_input("Date")
+                s_time = st.time_input("Start Time")
+                e_time = st.time_input("End Time")
+                if st.form_submit_button("Confirm Schedule"):
+                    res = log_schedule(pin, d, s_time, e_time)
+                    if res: st.success("Shift Added to Cloud")
+                    else: st.error("Schedule Failed - Check DB Connection")
+        
+        # View Shifts
+        st.markdown("#### Upcoming Shifts")
+        try:
+            client = get_db_connection()
+            if client:
+                sheet = client.open("ec_database").worksheet("schedule")
+                all_shifts = sheet.get_all_records()
+                # Filter for current user
+                my_shifts = [s for s in all_shifts if str(s.get('pin')).strip() == str(pin).strip()]
+                if my_shifts:
+                    st.dataframe(pd.DataFrame(my_shifts)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
+                else:
+                    st.info("No upcoming shifts scheduled.")
+        except: st.info("Schedule tab not found in DB.")
 
-    is_active = st.session_state.user_state['active']
-    current_earnings = st.session_state.user_state['earnings']
-    
-    if is_active:
-        start = st.session_state.user_state['start_time']
-        if start > 0:
-            elapsed_hours = (time.time() - start) / 3600
-            current_earnings = elapsed_hours * user['rate']
-            st.session_state.user_state['earnings'] = current_earnings
-    
-    net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
-
-    # 4. MONEY CARDS
-    c1, c2 = st.columns(2)
-    c1.metric("GROSS ACCRUAL", f"${current_earnings:,.2f}", delta="Live" if is_active else None)
-    c2.metric("NET PAYABLE", f"${net_pay:,.2f}", delta="Ready" if not is_active and net_pay > 0 else None)
-
-    # 5. CONTROLS
-    st.markdown("###") # Spacer
-    if is_active:
-        st.button("🔴 TERMINATE SESSION", on_click=cb_clock_out, use_container_width=True)
-    else:
-        if is_inside:
-            st.button("🟢 INITIALIZE PROTOCOL", on_click=cb_clock_in, use_container_width=True)
-        else:
-            st.info("📍 ENTER HOSPITAL ZONE TO BEGIN")
-            
-    # 6. WALLET
-    st.markdown("###")
-    if not is_active and current_earnings > 0.01:
-        st.info(f"💰 LIQUIDITY AVAILABLE: **${net_pay:,.2f}**")
-        st.button("💸 EXECUTE TRANSFER", on_click=cb_payout, use_container_width=True)
-
-    if st.session_state.user_state.get('payout_success'):
-        st.balloons()
-        st.success("ASSETS TRANSFERRED TO BANK")
-        st.session_state.user_state['payout_success'] = False
-
-    # 7. LOGS
-    with st.expander("📂 PROTOCOL LOGS"):
-        tab1, tab2 = st.tabs(["TRANSACTIONS", "ACTIVITY"])
-        with tab1:
+    with tab_logs:
+        sub_t1, sub_t2 = st.tabs(["TRANSACTIONS", "ACTIVITY"])
+        with sub_t1:
             try:
                 client = get_db_connection()
                 if client:
                     sheet = client.open("ec_database").worksheet("transactions")
                     st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
             except: st.write("No Records")
-        with tab2:
+        with sub_t2:
             try:
                 client = get_db_connection()
                 if client:
