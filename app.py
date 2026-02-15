@@ -10,16 +10,41 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="EC Enterprise", page_icon="🛡️")
+# --- 1. APP CONFIGURATION & STYLING ---
+st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="centered")
+
+# Custom CSS for "Medical Fintech" Look
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stApp { background-color: #0E1117; color: #FAFAFA; }
+    div[data-testid="metric-container"] {
+        background-color: #262730; border: 1px solid #464B5C;
+        padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        text-align: center;
+    }
+    .status-box { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; text-align: center; }
+    .status-safe { background-color: #1c4f2e; color: #4caf50; border: 1px solid #4caf50; }
+    .status-danger { background-color: #4f1c1c; color: #ff4b4b; border: 1px solid #ff4b4b; }
+    .status-neutral { background-color: #262730; color: #a6a6a6; border: 1px solid #464B5C; }
+    .stButton>button { width: 100%; height: 60px; font-size: 20px; font-weight: bold; border-radius: 12px; border: none; transition: 0.2s; }
+    .app-header {
+        background: linear-gradient(90deg, #102e4a 0%, #000000 100%);
+        padding: 20px; border-radius: 0px 0px 15px 15px;
+        margin-top: -60px; margin-bottom: 30px; text-align: center; border-bottom: 2px solid #3b8edb;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- CONFIGURATION (TARGET: BROCKTON HOSPITAL) ---
 HOSPITAL_LAT = 42.0875
 HOSPITAL_LON = -70.9915
-GEOFENCE_RADIUS = 50 
+GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 
-# ⚡ HEARTBEAT (The Pace Maker)
-# This forces the script to rerun every 10 seconds
+# ⚡ HEARTBEAT
 count = st_autorefresh(interval=10000, key="pulse")
 
 # --- DATABASE ENGINE ---
@@ -32,8 +57,9 @@ def get_db_connection():
         return client
     except: return None
 
-# --- STATE MANAGEMENT ---
-if 'user_state' not in st.session_state: 
+# --- STATE MANAGEMENT (THE FIX) ---
+# Check if key is missing and force rebuild
+if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
         'active': False, 
         'start_time': 0.0, 
@@ -41,14 +67,12 @@ if 'user_state' not in st.session_state:
         'locked': False,
         'payout_success': False,
         'clock_in_ip': None,
-        'data_loaded': False # Prevents the $0.00 scare
+        'data_loaded': False # This was missing in your session!
     }
 
 # --- BACKEND FUNCTIONS ---
 def get_current_ip():
-    try:
-        # Timeout set to 1s so it doesn't slow down the app
-        return requests.get('https://api.ipify.org', timeout=1).text
+    try: return requests.get('https://api.ipify.org', timeout=1).text
     except: return "Unknown"
 
 def get_cloud_state(pin):
@@ -64,8 +88,7 @@ def get_cloud_state(pin):
                 if str(key).strip().lower() == 'pin':
                     row_pin = str(row[key]).strip()
                     break
-            if row_pin == target_pin:
-                return row
+            if row_pin == target_pin: return row
         return {}
     except: return {}
 
@@ -108,35 +131,27 @@ def cb_clock_in():
     st.session_state.user_state['active'] = True
     st.session_state.user_state['start_time'] = time.time()
     st.session_state.user_state['locked'] = True 
-    
-    # Capture Cell Tower IP
     current_ip = get_current_ip()
     st.session_state.user_state['clock_in_ip'] = current_ip
-    
     pin = st.session_state.pin
     update_cloud_status(pin, "Active", time.time(), st.session_state.user_state['earnings'])
     log_history(pin, "CLOCK IN", st.session_state.user_state['earnings'], f"IP: {current_ip}")
 
 def cb_clock_out():
     st.session_state.user_state['active'] = False
-    
     pin = st.session_state.pin
     earnings = st.session_state.user_state['earnings']
     update_cloud_status(pin, "Inactive", 0, earnings)
     log_history(pin, "CLOCK OUT", earnings, "User Action")
 
 def cb_payout():
-    if st.session_state.user_state['earnings'] <= 0.01:
-        return 
-
+    if st.session_state.user_state['earnings'] <= 0.01: return 
     pin = st.session_state.pin
     amount = st.session_state.user_state['earnings']
     taxed_amount = amount * (1 - sum(TAX_RATES.values()))
-    
     log_transaction(pin, taxed_amount)
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['payout_success'] = True
-    
     update_cloud_status(pin, "Inactive", 0, 0)
     log_history(pin, "PAYOUT", taxed_amount, "Settled")
 
@@ -156,9 +171,8 @@ def cb_force_sync():
                 st.session_state.user_state['active'] = False
                 try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
                 except: pass
-            
             st.session_state.user_state['data_loaded'] = True
-            st.toast("Synced.")
+            st.toast("Sync Complete.")
         else:
             st.toast("User Not Found")
 
@@ -181,19 +195,24 @@ USERS = {
 
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
-    st.title("🛡️ EC Enterprise")
-    st.caption("v69.0 | Live Stream")
+    st.markdown("""
+        <div style="text-align: center; margin-top: 50px;">
+            <h1>🛡️ EC Enterprise</h1>
+            <p style="color: #888;">Secure Protocol Login</p>
+        </div>
+    """, unsafe_allow_html=True)
     
-    pin = st.text_input("ENTER PIN", type="password")
-    if st.button("AUTHENTICATE"):
-        if pin in USERS:
-            st.session_state.logged_in_user = USERS[pin]
-            st.session_state.pin = pin
-            if USERS[pin]['role'] != "Exec":
-                cb_force_sync()
-            st.rerun()
-        else:
-            st.error("INVALID PIN")
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        pin = st.text_input("ENTER PIN", type="password", label_visibility="collapsed")
+        if st.button("AUTHENTICATE"):
+            if pin in USERS:
+                st.session_state.logged_in_user = USERS[pin]
+                st.session_state.pin = pin
+                if USERS[pin]['role'] != "Exec": cb_force_sync()
+                st.rerun()
+            else:
+                st.error("ACCESS DENIED")
     st.stop()
 
 # --- MAIN APP ---
@@ -201,37 +220,43 @@ user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
 if user['role'] != "Exec":
-    st.title(f"👤 {user['name']}")
+    # 1. HEADER
+    st.markdown(f"""
+        <div class="app-header">
+            <h2 style='color:white; margin:0;'>EC ENTERPRISE</h2>
+            <p style='color:#3b8edb; margin:0; font-size: 14px;'>OPERATOR: {user['name'].upper()}</p>
+        </div>
+    """, unsafe_allow_html=True)
     
-    # --- 1. LIVE GPS & IP STREAM ---
-    # We use a dynamic key f"gps_{count}" so the widget RELOADS every 10s
+    # 2. LIVE GPS STREAM
     loc = get_geolocation(component_key=f"gps_{count}")
     current_ip = get_current_ip()
     
-    dist_msg = "Acquiring Signal..."
+    dist_msg = "ACQUIRING SIGNAL..."
+    status_class = "status-neutral"
     is_inside = False
     
     if loc:
         dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
         is_inside = dist < GEOFENCE_RADIUS
-        dist_msg = f"✅ INSIDE ZONE ({int(dist)}m)" if is_inside else f"🚫 OUTSIDE ZONE ({int(dist)}m)"
-        
-        # --- AUTO LOGOUT LOGIC ---
-        # If user is ACTIVE but OUTSIDE -> Force Clock Out
+        if is_inside:
+            dist_msg = f"✅ SECURE ZONE DETECTED ({int(dist)}m)"
+            status_class = "status-safe"
+        else:
+            dist_msg = f"🚫 OUTSIDE GEOFENCE ({int(dist)}m)"
+            status_class = "status-danger"
+            
         if st.session_state.user_state['active'] and not is_inside:
-            # Check for a 'Grace Period' logic here if desired, otherwise instant:
             cb_clock_out()
             st.error("⚠️ GEOFENCE EXIT - AUTO CLOCK OUT")
             st.rerun()
-            
-    st.info(f"📍 GPS: {dist_msg}")
-    st.caption(f"Network IP: {current_ip}")
 
-    # --- 2. EARNINGS ---
-    # DATA LOADING PROTECTION
+    st.markdown(f'<div class="status-box {status_class}">{dist_msg}</div>', unsafe_allow_html=True)
+
+    # 3. EARNINGS
     if not st.session_state.user_state['data_loaded']:
         with st.spinner("Syncing Financials..."):
-            cb_force_sync() # Try one last sync
+            cb_force_sync()
 
     is_active = st.session_state.user_state['active']
     current_earnings = st.session_state.user_state['earnings']
@@ -241,79 +266,76 @@ if user['role'] != "Exec":
         if start > 0:
             elapsed_hours = (time.time() - start) / 3600
             current_earnings = elapsed_hours * user['rate']
-            # Update local display state
             st.session_state.user_state['earnings'] = current_earnings
     
     net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
 
-    # --- 3. CONTROLS ---
-    st.markdown("### ⏱️ Shift Controls")
+    # 4. MONEY CARDS
     c1, c2 = st.columns(2)
-    c1.metric("GROSS", f"${current_earnings:,.2f}")
-    c2.metric("NET", f"${net_pay:,.2f}")
+    c1.metric("GROSS EARNINGS", f"${current_earnings:,.2f}")
+    c2.metric("NET PAYOUT", f"${net_pay:,.2f}")
 
+    # 5. CONTROLS
+    st.markdown("###") # Spacer
     if is_active:
-        st.success("🟢 ON SHIFT")
-        st.button("🔴 CLOCK OUT", on_click=cb_clock_out)
+        st.button("🔴 END SHIFT", on_click=cb_clock_out, use_container_width=True)
     else:
-        st.warning("⚪ OFF DUTY")
         if is_inside:
-            st.button("🟢 CLOCK IN", on_click=cb_clock_in)
+            st.button("🟢 START SHIFT", on_click=cb_clock_in, use_container_width=True)
         else:
-            st.error("Cannot Clock In: Outside Geofence")
+            st.warning("Position yourself within the hospital zone to begin.")
             
-    st.button("🔄 Force Cloud Sync", on_click=cb_force_sync)
-
-    # --- 4. WALLET ---
+    # 6. WALLET
     st.markdown("---")
-    st.markdown("### 💳 Digital Wallet")
-    
     if not is_active and current_earnings > 0.01:
-        st.info(f"💰 PENDING BALANCE: **${net_pay:,.2f}**")
-        if st.button("💸 INITIATE PAYOUT", on_click=cb_payout):
-            pass 
-    elif is_active:
-        st.caption("🔒 Funds accumulate while on shift.")
-    else:
-        st.caption("Wallet Empty.")
+        st.info(f"💰 PENDING: **${net_pay:,.2f}**")
+        st.button("💸 INITIATE PAYOUT", on_click=cb_payout, use_container_width=True)
 
     if st.session_state.user_state.get('payout_success'):
         st.balloons()
         st.success("FUNDS TRANSFERRED")
         st.session_state.user_state['payout_success'] = False
 
-    # --- 5. LOGS ---
+    # 7. LOGS
+    with st.expander("📜 HISTORY & LOGS"):
+        tab1, tab2 = st.tabs(["PAYOUTS", "SHIFTS"])
+        with tab1:
+            try:
+                client = get_db_connection()
+                if client:
+                    sheet = client.open("ec_database").worksheet("transactions")
+                    st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
+            except: st.write("No Data")
+        with tab2:
+            try:
+                client = get_db_connection()
+                if client:
+                    sheet = client.open("ec_database").worksheet("history")
+                    st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
+            except: st.write("No Data")
+        
     st.markdown("---")
-    tab1, tab2 = st.tabs(["Transaction History", "Shift Logs"])
-    
-    with tab1:
-        try:
-            client = get_db_connection()
-            if client:
-                sheet = client.open("ec_database").worksheet("transactions")
-                data = sheet.get_all_records()
-                st.dataframe(pd.DataFrame(data))
-        except: st.write("No Transactions")
-        
-    with tab2:
-        try:
-            client = get_db_connection()
-            if client:
-                sheet = client.open("ec_database").worksheet("history")
-                st.dataframe(pd.DataFrame(sheet.get_all_records()))
-        except: st.write("No Logs")
-        
-    if st.button("LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
+    c1, c2 = st.columns([3,1])
+    with c1:
+        st.caption(f"Network ID: {current_ip}")
+    with c2:
+        if st.button("LOGOUT"):
+            st.session_state.clear()
+            st.rerun()
 
 else:
-    st.title("🛡️ COMMAND CENTER")
-    # ... CFO LOGIC ...
+    # CFO VIEW
+    st.markdown(f"""
+        <div class="app-header">
+            <h2 style='color:white; margin:0;'>COMMAND CENTER</h2>
+            <p style='color:#f1c40f; margin:0;'>EXECUTIVE OVERVIEW</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
     client = get_db_connection()
     if client:
         sheet = client.open("ec_database").worksheet("workers")
-        st.dataframe(pd.DataFrame(sheet.get_all_records()))
+        st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
         
     if st.button("LOGOUT"):
         st.session_state.clear()
