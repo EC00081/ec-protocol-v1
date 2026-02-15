@@ -314,4 +314,106 @@ if user['role'] != "Exec":
         current_earnings = st.session_state.user_state['earnings']
         
         if is_active:
-            start = st.session_
+            start = st.session_state.user_state['start_time']
+            if start > 0:
+                elapsed_hours = (time.time() - start) / 3600
+                current_earnings = elapsed_hours * user['rate']
+                st.session_state.user_state['earnings'] = current_earnings
+        
+        net_pay = current_earnings * (1 - sum(TAX_RATES.values()))
+
+        c1, c2 = st.columns(2)
+        c1.metric("GROSS ACCRUAL", f"${current_earnings:,.2f}", delta="Live" if is_active else None)
+        c2.metric("NET PAYABLE", f"${net_pay:,.2f}", delta="Ready" if not is_active and net_pay > 0 else None)
+
+        st.markdown("###")
+        if is_active:
+            st.button("🔴 TERMINATE SESSION", on_click=cb_clock_out, use_container_width=True)
+        else:
+            if is_inside:
+                st.button("🟢 INITIALIZE PROTOCOL", on_click=cb_clock_in, use_container_width=True)
+            else:
+                st.info(f"📍 PROCEED TO {user.get('location').upper()} TO BEGIN")
+                
+        st.markdown("###")
+        if not is_active and current_earnings > 0.01:
+            st.info(f"💰 LIQUIDITY AVAILABLE: **${net_pay:,.2f}**")
+            st.button("💸 EXECUTE TRANSFER", on_click=cb_payout, use_container_width=True)
+            
+        if st.session_state.user_state.get('payout_success'):
+            st.balloons()
+            st.success("ASSETS TRANSFERRED TO BANK")
+            st.session_state.user_state['payout_success'] = False
+            
+        st.markdown("---")
+        st.caption(f"SECURE ID: {current_ip}")
+
+    # --- PAGE 2: SCHEDULER (STATIC - NO REFRESH) ---
+    elif page == "SCHEDULER":
+        st.markdown("### 📅 Rolling Schedule (Eastern Time)")
+        st.info("ℹ️ Live Refresh Paused for Data Entry")
+        
+        with st.form("add_shift_form"):
+            c1, c2 = st.columns(2)
+            d = c1.date_input("Date")
+            s_time = c1.time_input("Start Time (EST)")
+            e_time = c2.time_input("End Time (EST)")
+            if st.form_submit_button("Confirm Schedule", use_container_width=True):
+                res = log_schedule(pin, d, s_time, e_time)
+                if res: st.success("Shift Added to Cloud (Stored as UTC)")
+                else: st.error("Schedule Failed - Check DB Connection")
+        
+        st.markdown("#### Upcoming Shifts")
+        try:
+            client = get_db_connection()
+            if client:
+                sheet = client.open("ec_database").worksheet("schedule")
+                all_shifts = sheet.get_all_records()
+                my_shifts = [s for s in all_shifts if str(s.get('pin')).strip() == str(pin).strip()]
+                if my_shifts:
+                    st.dataframe(pd.DataFrame(my_shifts)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
+                else:
+                    st.info("No upcoming shifts scheduled.")
+        except: st.info("Schedule tab not found in DB.")
+
+    # --- PAGE 3: LOGS (STATIC) ---
+    elif page == "LOGS":
+        st.markdown("### 📂 Protocol Logs")
+        tab1, tab2 = st.tabs(["TRANSACTIONS", "ACTIVITY"])
+        with tab1:
+            try:
+                client = get_db_connection()
+                if client:
+                    sheet = client.open("ec_database").worksheet("transactions")
+                    st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
+            except: st.write("No Records")
+        with tab2:
+            try:
+                client = get_db_connection()
+                if client:
+                    sheet = client.open("ec_database").worksheet("history")
+                    st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
+            except: st.write("No Records")
+
+    # LOGOUT
+    if st.sidebar.button("LOGOUT"):
+        st.session_state.clear()
+        st.rerun()
+
+else:
+    # CFO VIEW
+    st.markdown(f"""
+        <div class="hero-header">
+            <h1 style='color:white; margin:0;'>COMMAND CENTER</h1>
+            <p style='color:#f1c40f; margin:0;'>GLOBAL OVERSIGHT</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    client = get_db_connection()
+    if client:
+        sheet = client.open("ec_database").worksheet("workers")
+        st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
+        
+    if st.button("LOGOUT"):
+        st.session_state.clear()
+        st.rerun()
