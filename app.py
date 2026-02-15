@@ -57,8 +57,8 @@ def get_db_connection():
         return client
     except: return None
 
-# --- STATE MANAGEMENT (THE FIX) ---
-# Check if key is missing and force rebuild
+# --- STATE MANAGEMENT ---
+# State Doctor: Check if key is missing and force rebuild
 if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
         'active': False, 
@@ -67,7 +67,7 @@ if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state
         'locked': False,
         'payout_success': False,
         'clock_in_ip': None,
-        'data_loaded': False # This was missing in your session!
+        'data_loaded': False
     }
 
 # --- BACKEND FUNCTIONS ---
@@ -236,16 +236,26 @@ if user['role'] != "Exec":
     status_class = "status-neutral"
     is_inside = False
     
+    # DEV CONTROL IN SIDEBAR
+    with st.sidebar:
+        dev_override = st.checkbox("DEV: FORCE GPS OVERRIDE")
+    
     if loc:
         dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
-        is_inside = dist < GEOFENCE_RADIUS
+        # CHECK OVERRIDE HERE
+        is_inside = dist < GEOFENCE_RADIUS or dev_override
+        
         if is_inside:
-            dist_msg = f"✅ SECURE ZONE DETECTED ({int(dist)}m)"
+            if dev_override:
+                dist_msg = f"✅ DEV OVERRIDE ACTIVE (Virtual Zone)"
+            else:
+                dist_msg = f"✅ SECURE ZONE DETECTED ({int(dist)}m)"
             status_class = "status-safe"
         else:
             dist_msg = f"🚫 OUTSIDE GEOFENCE ({int(dist)}m)"
             status_class = "status-danger"
             
+        # AUTO LOGOUT LOGIC (Only if NOT active)
         if st.session_state.user_state['active'] and not is_inside:
             cb_clock_out()
             st.error("⚠️ GEOFENCE EXIT - AUTO CLOCK OUT")
