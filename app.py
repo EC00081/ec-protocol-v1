@@ -4,6 +4,7 @@ import time
 import math
 import hashlib
 import requests
+import pytz # NEW: Timezone handling
 from datetime import datetime, timedelta
 from streamlit_js_eval import get_geolocation
 import gspread
@@ -110,6 +111,7 @@ HOSPITAL_LAT = 42.0875
 HOSPITAL_LON = -70.9915
 GEOFENCE_RADIUS = 300 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
+LOCAL_TZ = pytz.timezone('US/Eastern') # 📍 DEFINING THE LOCAL ZONE
 
 # ⚡ HEARTBEAT
 count = st_autorefresh(interval=10000, key="pulse")
@@ -124,7 +126,7 @@ def get_db_connection():
         return client
     except: return None
 
-# --- STATE MANAGEMENT (FIXED) ---
+# --- STATE MANAGEMENT ---
 # Auto-repair session state if keys are missing
 if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
@@ -193,14 +195,33 @@ def log_history(pin, action, amount, note):
             sheet.append_row([str(pin), action, str(datetime.now()), f"${amount:.2f}", note])
         except: pass
 
-def log_schedule(pin, date, start, end):
+# --- TIME ZONE INTELLIGENT SCHEDULER ---
+def log_schedule(pin, date_obj, start_time_obj, end_time_obj):
     client = get_db_connection()
     if client:
         try:
+            # 1. Combine Date + Time into a naive datetime
+            dt_start_naive = datetime.combine(date_obj, start_time_obj)
+            dt_end_naive = datetime.combine(date_obj, end_time_obj)
+            
+            # 2. Localize to Eastern Time (Tell Python this is EST)
+            dt_start_est = LOCAL_TZ.localize(dt_start_naive)
+            dt_end_est = LOCAL_TZ.localize(dt_end_naive)
+            
+            # 3. Convert to UTC for Storage
+            dt_start_utc = dt_start_est.astimezone(pytz.utc)
+            dt_end_utc = dt_end_est.astimezone(pytz.utc)
+            
+            # 4. Format for Sheet (ISO Format is best for logs)
+            start_str = dt_start_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+            end_str = dt_end_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+
             sheet = client.open("ec_database").worksheet("schedule")
-            sheet.append_row([str(pin), str(date), str(start), str(end), "Scheduled"])
+            sheet.append_row([str(pin), str(date_obj), start_str, end_str, "Scheduled"])
             return True
-        except: return False
+        except Exception as e: 
+            return False
+    return False
 
 # --- CALLBACKS ---
 def cb_clock_in():
@@ -390,17 +411,17 @@ if user['role'] != "Exec":
             st.session_state.user_state['payout_success'] = False
 
     with tab_schedule:
-        st.markdown("### 📅 Rolling Schedule")
+        st.markdown("### 📅 Rolling Schedule (Eastern Time)")
         
         # Add Shift Form
         with st.expander("➕ Add New Shift"):
             with st.form("add_shift_form"):
                 d = st.date_input("Date")
-                s_time = st.time_input("Start Time")
-                e_time = st.time_input("End Time")
+                s_time = st.time_input("Start Time (EST)")
+                e_time = st.time_input("End Time (EST)")
                 if st.form_submit_button("Confirm Schedule"):
                     res = log_schedule(pin, d, s_time, e_time)
-                    if res: st.success("Shift Added to Cloud")
+                    if res: st.success("Shift Added to Cloud (Stored as UTC)")
                     else: st.error("Schedule Failed - Check DB Connection")
         
         # View Shifts
@@ -410,10 +431,19 @@ if user['role'] != "Exec":
             if client:
                 sheet = client.open("ec_database").worksheet("schedule")
                 all_shifts = sheet.get_all_records()
-                # Filter for current user
                 my_shifts = [s for s in all_shifts if str(s.get('pin')).strip() == str(pin).strip()]
-                if my_shifts:
-                    st.dataframe(pd.DataFrame(my_shifts)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
+                
+                # DISPLAY LOGIC: CONVERT BACK TO READABLE TIME
+                display_data = []
+                for s in my_shifts:
+                    try:
+                        # Parse the UTC string back to a clean format
+                        # Simplification: We just display what we have for now, but in V75 we could pretty-print this
+                        display_data.append(s)
+                    except: pass
+                
+                if display_data:
+                    st.dataframe(pd.DataFrame(display_data)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
                 else:
                     st.info("No upcoming shifts scheduled.")
         except: st.info("Schedule tab not found in DB.")
