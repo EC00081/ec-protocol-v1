@@ -10,30 +10,108 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. APP CONFIGURATION & STYLING ---
+# --- 1. PREMIUM UI CONFIGURATION ---
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="centered")
 
-# Custom CSS for "Medical Fintech" Look
+# $100M APP STYLING (GLASSMORPHISM & ANIMATIONS)
 st.markdown("""
     <style>
+    /* HIDE DEFAULT STREAMLIT UI */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    .stApp { background-color: #0E1117; color: #FAFAFA; }
-    div[data-testid="metric-container"] {
-        background-color: #262730; border: 1px solid #464B5C;
-        padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        text-align: center;
+    
+    /* GLOBAL THEME */
+    .stApp {
+        background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117);
+        color: #FFFFFF;
+        font-family: 'Inter', -apple-system, sans-serif;
     }
-    .status-box { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; text-align: center; }
-    .status-safe { background-color: #1c4f2e; color: #4caf50; border: 1px solid #4caf50; }
-    .status-danger { background-color: #4f1c1c; color: #ff4b4b; border: 1px solid #ff4b4b; }
-    .status-neutral { background-color: #262730; color: #a6a6a6; border: 1px solid #464B5C; }
-    .stButton>button { width: 100%; height: 60px; font-size: 20px; font-weight: bold; border-radius: 12px; border: none; transition: 0.2s; }
-    .app-header {
-        background: linear-gradient(90deg, #102e4a 0%, #000000 100%);
-        padding: 20px; border-radius: 0px 0px 15px 15px;
-        margin-top: -60px; margin-bottom: 30px; text-align: center; border-bottom: 2px solid #3b8edb;
+    
+    /* RADAR PULSE ANIMATION */
+    @keyframes pulse-green {
+        0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
+        70% { box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+    }
+    @keyframes pulse-red {
+        0% { box-shadow: 0 0 0 0 rgba(255, 75, 75, 0.7); }
+        70% { box-shadow: 0 0 0 10px rgba(255, 75, 75, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 75, 75, 0); }
+    }
+    
+    /* GLASS CARDS (MONEY & STATS) */
+    div[data-testid="metric-container"] {
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        transition: transform 0.2s;
+    }
+    div[data-testid="metric-container"]:hover {
+        transform: translateY(-2px);
+        background: rgba(255, 255, 255, 0.05);
+    }
+    
+    /* STATUS PILLS */
+    .status-pill {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px 20px;
+        border-radius: 50px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        margin-bottom: 25px;
+        backdrop-filter: blur(10px);
+    }
+    .safe-mode {
+        background: rgba(28, 79, 46, 0.4);
+        border: 1px solid #2e7d32;
+        color: #4caf50;
+        animation: pulse-green 2s infinite;
+    }
+    .danger-mode {
+        background: rgba(79, 28, 28, 0.4);
+        border: 1px solid #c62828;
+        color: #ff5252;
+        animation: pulse-red 2s infinite;
+    }
+    
+    /* MODERN BUTTONS */
+    .stButton>button {
+        width: 100%;
+        height: 64px;
+        border-radius: 14px;
+        font-weight: 700;
+        font-size: 18px;
+        border: none;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: all 0.3s ease;
+    }
+    
+    /* HEADER DESIGN */
+    .hero-header {
+        text-align: center;
+        padding: 40px 20px;
+        background: linear-gradient(180deg, rgba(14,17,23,0) 0%, rgba(14,17,23,1) 100%), 
+                    url("https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2670&auto=format&fit=crop");
+        background-size: cover;
+        background-position: center;
+        border-radius: 0 0 24px 24px;
+        margin-top: -70px;
+        margin-bottom: 30px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    
+    /* DATA TABLES */
+    div[data-testid="stDataFrame"] {
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 12px;
+        overflow: hidden;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -58,7 +136,6 @@ def get_db_connection():
     except: return None
 
 # --- STATE MANAGEMENT ---
-# State Doctor: Check if key is missing and force rebuild
 if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
         'active': False, 
@@ -157,7 +234,7 @@ def cb_payout():
 
 def cb_force_sync():
     pin = st.session_state.pin
-    with st.spinner("Connecting to HQ..."):
+    with st.spinner("Establishing Secure Handshake..."):
         cloud = get_cloud_state(pin)
         if cloud:
             status_val = str(cloud.get('status', '')).strip().lower()
@@ -172,9 +249,9 @@ def cb_force_sync():
                 try: st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
                 except: pass
             st.session_state.user_state['data_loaded'] = True
-            st.toast("Sync Complete.")
+            st.toast("Protocol Synced.")
         else:
-            st.toast("User Not Found")
+            st.toast("User ID Not Found")
 
 # --- MATH ---
 def get_distance(lat1, lon1, lat2, lon2):
@@ -196,23 +273,24 @@ USERS = {
 # --- LOGIN SCREEN ---
 if 'logged_in_user' not in st.session_state:
     st.markdown("""
-        <div style="text-align: center; margin-top: 50px;">
-            <h1>🛡️ EC Enterprise</h1>
-            <p style="color: #888;">Secure Protocol Login</p>
+        <div style="text-align: center; padding: 50px;">
+            <h1 style="font-size: 60px;">🛡️</h1>
+            <h1 style="font-weight: 800; letter-spacing: -2px;">EC PROTOCOL</h1>
+            <p style="color: #6e7280; font-size: 14px; text-transform: uppercase; letter-spacing: 2px;">Enterprise Login</p>
         </div>
     """, unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        pin = st.text_input("ENTER PIN", type="password", label_visibility="collapsed")
-        if st.button("AUTHENTICATE"):
+        pin = st.text_input("ACCESS CODE", type="password", label_visibility="collapsed")
+        if st.button("INITIALIZE SESSION"):
             if pin in USERS:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
                 if USERS[pin]['role'] != "Exec": cb_force_sync()
                 st.rerun()
             else:
-                st.error("ACCESS DENIED")
+                st.error("UNAUTHORIZED")
     st.stop()
 
 # --- MAIN APP ---
@@ -222,9 +300,11 @@ pin = st.session_state.pin
 if user['role'] != "Exec":
     # 1. HEADER
     st.markdown(f"""
-        <div class="app-header">
-            <h2 style='color:white; margin:0;'>EC ENTERPRISE</h2>
-            <p style='color:#3b8edb; margin:0; font-size: 14px;'>OPERATOR: {user['name'].upper()}</p>
+        <div class="hero-header">
+            <h1 style='color:white; margin:0; font-size: 28px; font-weight: 800;'>EC ENTERPRISE</h1>
+            <div style='display:inline-block; padding: 4px 12px; border-radius: 20px; background: rgba(59, 142, 219, 0.2); border: 1px solid #3b8edb; color: #3b8edb; font-size: 12px; margin-top: 10px;'>
+                OPERATOR: {user['name'].upper()}
+            </div>
         </div>
     """, unsafe_allow_html=True)
     
@@ -232,40 +312,43 @@ if user['role'] != "Exec":
     loc = get_geolocation(component_key=f"gps_{count}")
     current_ip = get_current_ip()
     
-    dist_msg = "ACQUIRING SIGNAL..."
-    status_class = "status-neutral"
+    dist_msg = "ACQUIRING SATELLITE..."
+    pill_class = "status-neutral"
     is_inside = False
     
     # DEV CONTROL IN SIDEBAR
     with st.sidebar:
-        dev_override = st.checkbox("DEV: FORCE GPS OVERRIDE")
+        st.caption("DEVELOPER TOOLS")
+        dev_override = st.checkbox("FORCE GPS OVERRIDE (VIRTUAL)")
     
     if loc:
         dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], HOSPITAL_LAT, HOSPITAL_LON)
-        # CHECK OVERRIDE HERE
         is_inside = dist < GEOFENCE_RADIUS or dev_override
         
         if is_inside:
             if dev_override:
-                dist_msg = f"✅ DEV OVERRIDE ACTIVE (Virtual Zone)"
+                dist_msg = "✅ VIRTUAL ZONE ACTIVE"
             else:
-                dist_msg = f"✅ SECURE ZONE DETECTED ({int(dist)}m)"
-            status_class = "status-safe"
+                dist_msg = f"✅ SECURE ZONE • {int(dist)}m"
+            pill_class = "safe-mode"
         else:
-            dist_msg = f"🚫 OUTSIDE GEOFENCE ({int(dist)}m)"
-            status_class = "status-danger"
+            dist_msg = f"🚫 OUTSIDE PERIMETER • {int(dist)}m"
+            pill_class = "danger-mode"
             
-        # AUTO LOGOUT LOGIC (Only if NOT active)
         if st.session_state.user_state['active'] and not is_inside:
             cb_clock_out()
-            st.error("⚠️ GEOFENCE EXIT - AUTO CLOCK OUT")
+            st.error("⚠️ GEOFENCE BREACH - PROTOCOL HALTED")
             st.rerun()
 
-    st.markdown(f'<div class="status-box {status_class}">{dist_msg}</div>', unsafe_allow_html=True)
+    st.markdown(f'''
+        <div class="status-pill {pill_class}">
+            {dist_msg}
+        </div>
+    ''', unsafe_allow_html=True)
 
     # 3. EARNINGS
     if not st.session_state.user_state['data_loaded']:
-        with st.spinner("Syncing Financials..."):
+        with st.spinner("Decrypting Financial Data..."):
             cb_force_sync()
 
     is_active = st.session_state.user_state['active']
@@ -282,52 +365,52 @@ if user['role'] != "Exec":
 
     # 4. MONEY CARDS
     c1, c2 = st.columns(2)
-    c1.metric("GROSS EARNINGS", f"${current_earnings:,.2f}")
-    c2.metric("NET PAYOUT", f"${net_pay:,.2f}")
+    c1.metric("GROSS ACCRUAL", f"${current_earnings:,.2f}", delta="Live" if is_active else None)
+    c2.metric("NET PAYABLE", f"${net_pay:,.2f}", delta="Ready" if not is_active and net_pay > 0 else None)
 
     # 5. CONTROLS
     st.markdown("###") # Spacer
     if is_active:
-        st.button("🔴 END SHIFT", on_click=cb_clock_out, use_container_width=True)
+        st.button("🔴 TERMINATE SESSION", on_click=cb_clock_out, use_container_width=True)
     else:
         if is_inside:
-            st.button("🟢 START SHIFT", on_click=cb_clock_in, use_container_width=True)
+            st.button("🟢 INITIALIZE PROTOCOL", on_click=cb_clock_in, use_container_width=True)
         else:
-            st.warning("Position yourself within the hospital zone to begin.")
+            st.info("📍 ENTER HOSPITAL ZONE TO BEGIN")
             
     # 6. WALLET
-    st.markdown("---")
+    st.markdown("###")
     if not is_active and current_earnings > 0.01:
-        st.info(f"💰 PENDING: **${net_pay:,.2f}**")
-        st.button("💸 INITIATE PAYOUT", on_click=cb_payout, use_container_width=True)
+        st.info(f"💰 LIQUIDITY AVAILABLE: **${net_pay:,.2f}**")
+        st.button("💸 EXECUTE TRANSFER", on_click=cb_payout, use_container_width=True)
 
     if st.session_state.user_state.get('payout_success'):
         st.balloons()
-        st.success("FUNDS TRANSFERRED")
+        st.success("ASSETS TRANSFERRED TO BANK")
         st.session_state.user_state['payout_success'] = False
 
     # 7. LOGS
-    with st.expander("📜 HISTORY & LOGS"):
-        tab1, tab2 = st.tabs(["PAYOUTS", "SHIFTS"])
+    with st.expander("📂 PROTOCOL LOGS"):
+        tab1, tab2 = st.tabs(["TRANSACTIONS", "ACTIVITY"])
         with tab1:
             try:
                 client = get_db_connection()
                 if client:
                     sheet = client.open("ec_database").worksheet("transactions")
                     st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
-            except: st.write("No Data")
+            except: st.write("No Records")
         with tab2:
             try:
                 client = get_db_connection()
                 if client:
                     sheet = client.open("ec_database").worksheet("history")
                     st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
-            except: st.write("No Data")
+            except: st.write("No Records")
         
     st.markdown("---")
     c1, c2 = st.columns([3,1])
     with c1:
-        st.caption(f"Network ID: {current_ip}")
+        st.caption(f"SECURE ID: {current_ip}")
     with c2:
         if st.button("LOGOUT"):
             st.session_state.clear()
@@ -336,9 +419,9 @@ if user['role'] != "Exec":
 else:
     # CFO VIEW
     st.markdown(f"""
-        <div class="app-header">
-            <h2 style='color:white; margin:0;'>COMMAND CENTER</h2>
-            <p style='color:#f1c40f; margin:0;'>EXECUTIVE OVERVIEW</p>
+        <div class="hero-header">
+            <h1 style='color:white; margin:0;'>COMMAND CENTER</h1>
+            <p style='color:#f1c40f; margin:0;'>GLOBAL OVERSIGHT</p>
         </div>
     """, unsafe_allow_html=True)
     
