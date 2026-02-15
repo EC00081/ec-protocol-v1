@@ -251,8 +251,7 @@ user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
 if user['role'] != "Exec":
-    # 1. SIDEBAR (ALWAYS VISIBLE)
-    # This ensures Dev Tools are available on EVERY tab
+    # 🌟 PRIORITY 1: RENDER SIDEBAR FIRST (FIXES MISSING UI)
     with st.sidebar:
         st.markdown("### 🧭 NAVIGATION")
         page = st.radio("", ["LIVE DASHBOARD", "SCHEDULER", "LOGS"], label_visibility="collapsed")
@@ -376,8 +375,6 @@ if user['role'] != "Exec":
                 sheet = client.open("ec_database").worksheet("schedule")
                 all_shifts = sheet.get_all_records()
                 my_shifts = [s for s in all_shifts if str(s.get('pin')).strip() == str(pin).strip()]
-                
-                # Basic display for now
                 if my_shifts:
                     st.dataframe(pd.DataFrame(my_shifts)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
                 else:
