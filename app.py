@@ -59,7 +59,6 @@ TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 
 # --- USERS DATABASE (MULTI-HOSPITAL) ---
-# Each user now has specific coordinates
 USERS = {
     "1001": {
         "name": "Liam O'Neil", "role": "RT", "rate": 85.00,
@@ -252,18 +251,30 @@ user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
 if user['role'] != "Exec":
-    # 1. HEADER
+    # 1. SIDEBAR (ALWAYS VISIBLE)
+    # This ensures Dev Tools are available on EVERY tab
+    with st.sidebar:
+        st.markdown("### 🧭 NAVIGATION")
+        page = st.radio("", ["LIVE DASHBOARD", "SCHEDULER", "LOGS"], label_visibility="collapsed")
+        
+        st.markdown("---")
+        st.caption("DEVELOPER TOOLS")
+        dev_override = st.checkbox("FORCE GPS OVERRIDE (VIRTUAL)")
+        
+        st.markdown("---")
+        if st.button("LOGOUT"):
+            st.session_state.clear()
+            st.rerun()
+
+    # 2. HEADER
     st.markdown(f"""
         <div class="hero-header">
             <h1 style='color:white; margin:0; font-size: 28px; font-weight: 800;'>EC ENTERPRISE</h1>
             <div style='display:inline-block; padding: 4px 12px; border-radius: 20px; background: rgba(59, 142, 219, 0.2); border: 1px solid #3b8edb; color: #3b8edb; font-size: 12px; margin-top: 10px;'>
-                OPERATOR: {user['name'].upper()} | {user.get('location', 'Unknown')}
+                OPERATOR: {user['name'].upper()}
             </div>
         </div>
     """, unsafe_allow_html=True)
-    
-    # NAVIGATION (Sidebar controls the Refresh Logic)
-    page = st.sidebar.radio("NAVIGATION", ["LIVE DASHBOARD", "SCHEDULER", "LOGS"])
     
     # 🚨 HEARTBEAT LOGIC: ONLY RUNS ON DASHBOARD 🚨
     if page == "LIVE DASHBOARD":
@@ -279,13 +290,8 @@ if user['role'] != "Exec":
         pill_class = "status-neutral"
         is_inside = False
         
-        # USER SPECIFIC COORDINATES
         TARGET_LAT = user.get('lat', 0)
         TARGET_LON = user.get('lon', 0)
-        
-        with st.sidebar:
-            st.caption("DEVELOPER TOOLS")
-            dev_override = st.checkbox("FORCE GPS OVERRIDE (VIRTUAL)")
         
         if loc:
             dist = get_distance(loc['coords']['latitude'], loc['coords']['longitude'], TARGET_LAT, TARGET_LON)
@@ -333,7 +339,7 @@ if user['role'] != "Exec":
             if is_inside:
                 st.button("🟢 INITIALIZE PROTOCOL", on_click=cb_clock_in, use_container_width=True)
             else:
-                st.info(f"📍 PROCEED TO {user.get('location').upper()} TO BEGIN")
+                st.info(f"📍 PROCEED TO {user.get('location', 'HOSPITAL').upper()} TO BEGIN")
                 
         st.markdown("###")
         if not is_active and current_earnings > 0.01:
@@ -370,6 +376,8 @@ if user['role'] != "Exec":
                 sheet = client.open("ec_database").worksheet("schedule")
                 all_shifts = sheet.get_all_records()
                 my_shifts = [s for s in all_shifts if str(s.get('pin')).strip() == str(pin).strip()]
+                
+                # Basic display for now
                 if my_shifts:
                     st.dataframe(pd.DataFrame(my_shifts)[['date', 'start_time', 'end_time', 'notes']], use_container_width=True)
                 else:
@@ -394,11 +402,6 @@ if user['role'] != "Exec":
                     sheet = client.open("ec_database").worksheet("history")
                     st.dataframe(pd.DataFrame(sheet.get_all_records()), use_container_width=True)
             except: st.write("No Records")
-
-    # LOGOUT
-    if st.sidebar.button("LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
 
 else:
     # CFO VIEW
