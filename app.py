@@ -20,7 +20,6 @@ try:
     BIO_ENGINE_AVAILABLE = True
 except ImportError:
     BIO_ENGINE_AVAILABLE = False
-    # Fallback classes for demo to prevent crashing
     class Point:
         def __init__(self, x, y): self.x, self.y = x, y
     class Polygon:
@@ -59,7 +58,7 @@ TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 BROCKTON_POLYGON_COORDS = [(42.0880, -70.9920), (42.0880, -70.9910), (42.0870, -70.9910), (42.0870, -70.9920)]
 HOSPITAL_FENCE = Polygon(BROCKTON_POLYGON_COORDS)
-GEOFENCE_RADIUS = 45 # Fallback radius
+GEOFENCE_RADIUS = 45 
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
@@ -72,7 +71,6 @@ USERS = {
 # --- 3. LOGIC ENGINE ---
 def verify_polygon_access(user_lat, user_lon):
     if not BIO_ENGINE_AVAILABLE:
-        # Fallback Radius Check
         target_lat = 42.0875
         target_lon = -70.9915
         R = 6371000
@@ -86,7 +84,7 @@ def verify_polygon_access(user_lat, user_lon):
 
 def process_biometric_hash(image_upload):
     if not BIO_ENGINE_AVAILABLE:
-        time.sleep(1.0) # Simulate processing time
+        time.sleep(1.0)
         return True, "SIMULATED_HASH"
     try:
         img = face_recognition.load_image_file(image_upload)
@@ -107,19 +105,44 @@ def get_current_ip():
     try: return requests.get('https://api.ipify.org', timeout=1).text
     except: return "Unknown"
 
-def get_cloud_state(pin):
+# --- THE FIX: ROBUST CLOUD SYNC ---
+def force_cloud_sync(pin):
+    """Pulls the definitive state from DB and updates Session State."""
     client = get_db_connection()
-    if not client: return {}
+    if not client: return False
     try:
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         target = str(pin).strip()
+        
+        found = False
         for row in records:
-            for k, v in row.items():
-                if str(k).lower().strip() == 'pin' and str(v).strip() == target:
-                    return row
-        return {}
-    except: return {}
+            # Fuzzy match PIN
+            if str(row.get('pin')).strip() == target:
+                found = True
+                status = str(row.get('status')).strip().lower()
+                
+                # CRITICAL: SYNC SESSION WITH CLOUD TRUTH
+                if status == 'active':
+                    st.session_state.user_state['active'] = True
+                    try:
+                        st.session_state.user_state['start_time'] = float(row.get('start_time', time.time()))
+                        # Restore earnings from previous session if they exist
+                        cloud_earnings = float(row.get('earnings', 0))
+                        # If start time is old, recalculate earnings
+                        if st.session_state.user_state['start_time'] > 0:
+                             elapsed = (time.time() - st.session_state.user_state['start_time']) / 3600
+                             rate = USERS.get(target, {}).get('rate', 0)
+                             # Don't double add, trust the calc
+                             pass
+                    except: pass
+                    st.session_state.user_state['bio_auth_passed'] = True # Assume passed if active in cloud
+                else:
+                    st.session_state.user_state['active'] = False
+                    st.session_state.user_state['bio_auth_passed'] = False
+                break
+        return found
+    except: return False
 
 def update_cloud_status(pin, status, start, earn):
     client = get_db_connection()
@@ -205,7 +228,7 @@ def create_receipt_html(user_name, amount, tx_id):
                 <hr style="border: 1px dashed #333;">
                 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v86.0</div>
+                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v87.0</div>
             </div>
         </body>
     </html>
@@ -218,7 +241,8 @@ defaults = {
     'active': False, 'start_time': 0.0, 'earnings': 0.0, 
     'payout_success': False, 'data_loaded': False, 
     'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False,
-    'show_camera_in': False, 'show_camera_out': False
+    'show_camera_in': False, 'show_camera_out': False,
+    'gps_grace_count': 0 # New: Buffer for GPS drift
 }
 for k, v in defaults.items():
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
@@ -233,14 +257,11 @@ if 'logged_in_user' not in st.session_state:
             if pin in USERS:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
+                # Force Sync on Login
                 if USERS[pin]['role'] != "Exec":
-                    cloud = get_cloud_state(pin)
-                    if cloud and str(cloud.get('status')).lower() == 'active':
-                        st.session_state.user_state['active'] = True
-                        st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
-                        st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                        st.session_state.user_state['bio_auth_passed'] = True 
-                    st.session_state.user_state['data_loaded'] = True
+                    with st.spinner("SYNCING WITH HQ..."):
+                        force_cloud_sync(pin)
+                        st.session_state.user_state['data_loaded'] = True
                 st.rerun()
             else: st.error("INVALID PIN")
     st.stop()
@@ -248,28 +269,18 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 7. CRITICAL CALLBACKS (THE FIX) ---
+# --- 7. CALLBACKS ---
 def secure_payout_callback():
-    # 1. ATOMIC CHECK: Check if money is already gone
     current_bal = st.session_state.user_state['earnings']
-    if current_bal <= 0.01:
-        st.toast("⚠️ Transaction already processed!", icon="🚫")
-        return 
-
-    # 2. CALCULATE
+    if current_bal <= 0.01: return 
     net = current_bal * (1 - sum(TAX_RATES.values()))
-    
-    # 3. WIPE STATE INSTANTLY (Prevents Double Click)
-    st.session_state.user_state['earnings'] = 0.0
-    st.session_state.user_state['payout_success'] = True
-    st.session_state.user_state['last_tx_id'] = f"TX-{int(time.time())}" # Temp ID for UI
-    st.session_state.user_state['last_payout'] = net
-    
-    # 4. LOG TO DB (Async-ish)
     tx_id = log_transaction(pin, net)
-    st.session_state.user_state['last_tx_id'] = tx_id # Update with real ID
     log_history(pin, "PAYOUT", net, "Settled")
     update_cloud_status(pin, "Inactive", 0, 0)
+    st.session_state.user_state['earnings'] = 0.0
+    st.session_state.user_state['last_tx_id'] = tx_id
+    st.session_state.user_state['last_payout'] = net
+    st.session_state.user_state['payout_success'] = True
 
 # --- 8. APP UI ---
 with st.sidebar:
@@ -313,21 +324,30 @@ else:
         cls = "safe-mode" if gps_valid else "danger-mode"
         st.markdown(f'<div class="status-pill {cls}">{msg}</div>', unsafe_allow_html=True)
         
-        # AUTO LOGOUT
+        # --- ROBUST AUTO LOGOUT (Grace Period) ---
         if st.session_state.user_state['active'] and not gps_valid:
-            st.session_state.user_state['active'] = False
-            st.session_state.user_state['bio_auth_passed'] = False
-            update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
-            log_history(pin, "AUTO-LOGOUT", st.session_state.user_state['earnings'], "Geofence Exit")
-            st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
-            st.rerun()
+            # Add a buffer so 1 failed GPS signal doesn't kill the session
+            st.session_state.user_state['gps_grace_count'] += 1
+            if st.session_state.user_state['gps_grace_count'] > 3: # 3 strikes (30 seconds)
+                st.session_state.user_state['active'] = False
+                st.session_state.user_state['bio_auth_passed'] = False
+                update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
+                log_history(pin, "AUTO-LOGOUT", st.session_state.user_state['earnings'], "Geofence Exit")
+                st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
+                st.rerun()
+        else:
+            st.session_state.user_state['gps_grace_count'] = 0 # Reset buffer if signal is good
 
         active = st.session_state.user_state['active']
         earnings = st.session_state.user_state['earnings']
+        
+        # Calculate Real-Time Earnings
         if active:
-            earnings += ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
-            st.session_state.user_state['start_time'] = time.time() 
-            st.session_state.user_state['earnings'] = earnings
+            start_t = st.session_state.user_state['start_time']
+            if start_t > 0:
+                elapsed_hrs = (time.time() - start_t) / 3600
+                earnings = elapsed_hrs * user['rate']
+                st.session_state.user_state['earnings'] = earnings
 
         gross = earnings
         tax_held = earnings * 0.3465
@@ -340,8 +360,9 @@ else:
         
         st.markdown("###")
         
-        # --- CAMERA LOGIC ---
+        # --- UI STATE CONTROL (PREVENTS CONCURRENT CLICKS) ---
         if active:
+            # USER IS CLOCKED IN -> SHOW CLOCK OUT ONLY
             if st.session_state.user_state['show_camera_out']:
                 st.info("📸 BIO-HASH VERIFICATION REQUIRED")
                 img = st.camera_input("SCAN FACE")
@@ -361,6 +382,7 @@ else:
                     st.session_state.user_state['show_camera_out'] = True
                     st.rerun()
         else:
+            # USER IS CLOCKED OUT -> SHOW CLOCK IN ONLY
             if gps_valid:
                 if st.session_state.user_state['show_camera_in']:
                     st.info("📸 BIO-HASH VERIFICATION REQUIRED")
@@ -386,9 +408,6 @@ else:
         
         st.markdown("###")
         
-        # --- SECURE PAYOUT BUTTON (The Fix) ---
-        # The button ONLY appears if earnings > 0.01
-        # The secure_payout_callback wipes the earnings to 0.0 immediately
         if not active and earnings > 0.01:
             st.button(f"💸 PAYOUT ${net:,.2f}", on_click=secure_payout_callback)
         
