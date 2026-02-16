@@ -7,7 +7,7 @@ import pytz
 import base64
 import uuid
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_js_eval import get_geolocation
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -63,12 +63,45 @@ GEOFENCE_RADIUS = 45
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
 USERS = {
-    "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
-    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
+    "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton", "license": "RRT-998822"},
+    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton", "license": "RRT-776655"},
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- 3. LOGIC ENGINE ---
+# --- 3. MIDDLEWARE LAYER (COMPLIANCE) ---
+def verify_practitioner(pin, role):
+    """
+    Simulates a PSV (Primary Source Verification) call to Nursys/NBRC/OIG.
+    Returns: (bool_is_valid, str_message)
+    """
+    # 1. Simulate API Latency (Real checks take time)
+    time.sleep(2.0) 
+    
+    # 2. Mock Databases (The Oracle)
+    mock_nursys_nbrc = {
+        "1001": {"status": "Active", "expires": "2028-01-01"},
+        "1002": {"status": "Active", "expires": "2027-05-20"},
+        "9000": {"status": "Expired", "expires": "2025-01-01"} # Test case
+    }
+    mock_oig_exclusion = ["9999", "6666"] # Blacklisted PINs
+
+    # 3. OIG Check (Federal Blacklist)
+    if str(pin) in mock_oig_exclusion:
+        return False, "⚠️ OIG EXCLUSION LIST MATCH - ACCOUNT FROZEN"
+
+    # 4. License Status Check
+    user_record = mock_nursys_nbrc.get(str(pin))
+    if not user_record:
+        return False, "⚠️ LICENSE NOT FOUND IN REGISTRY"
+    
+    if user_record['status'] != 'Active':
+        return False, f"⚠️ LICENSE STATUS: {user_record['status'].upper()}"
+
+    # 5. Success
+    source = "NBRC" if role == "RRT" else "Nursys"
+    return True, f"✅ {source} VERIFIED | OIG CLEAR"
+
+# --- 4. LOGIC ENGINE ---
 def verify_polygon_access(user_lat, user_lon):
     if not BIO_ENGINE_AVAILABLE:
         target_lat = 42.0875
@@ -93,7 +126,7 @@ def process_biometric_hash(image_upload):
         return True, face_recognition.face_encodings(img, face_locations)[0]
     except Exception as e: return False, str(e)
 
-# --- 4. BACKEND ---
+# --- 5. BACKEND ---
 def get_db_connection():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -105,9 +138,7 @@ def get_current_ip():
     try: return requests.get('https://api.ipify.org', timeout=1).text
     except: return "Unknown"
 
-# --- THE FIX: ROBUST CLOUD SYNC ---
 def force_cloud_sync(pin):
-    """Pulls the definitive state from DB and updates Session State."""
     client = get_db_connection()
     if not client: return False
     try:
@@ -117,26 +148,15 @@ def force_cloud_sync(pin):
         
         found = False
         for row in records:
-            # Fuzzy match PIN
             if str(row.get('pin')).strip() == target:
                 found = True
                 status = str(row.get('status')).strip().lower()
-                
-                # CRITICAL: SYNC SESSION WITH CLOUD TRUTH
                 if status == 'active':
                     st.session_state.user_state['active'] = True
                     try:
                         st.session_state.user_state['start_time'] = float(row.get('start_time', time.time()))
-                        # Restore earnings from previous session if they exist
-                        cloud_earnings = float(row.get('earnings', 0))
-                        # If start time is old, recalculate earnings
-                        if st.session_state.user_state['start_time'] > 0:
-                             elapsed = (time.time() - st.session_state.user_state['start_time']) / 3600
-                             rate = USERS.get(target, {}).get('rate', 0)
-                             # Don't double add, trust the calc
-                             pass
                     except: pass
-                    st.session_state.user_state['bio_auth_passed'] = True # Assume passed if active in cloud
+                    st.session_state.user_state['bio_auth_passed'] = True 
                 else:
                     st.session_state.user_state['active'] = False
                     st.session_state.user_state['bio_auth_passed'] = False
@@ -228,26 +248,26 @@ def create_receipt_html(user_name, amount, tx_id):
                 <hr style="border: 1px dashed #333;">
                 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v87.0</div>
+                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v88.0</div>
             </div>
         </body>
     </html>
     """
     return html
 
-# --- 5. INITIALIZATION ---
+# --- 6. INITIALIZATION ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {}
 defaults = {
     'active': False, 'start_time': 0.0, 'earnings': 0.0, 
     'payout_success': False, 'data_loaded': False, 
     'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False,
     'show_camera_in': False, 'show_camera_out': False,
-    'gps_grace_count': 0 # New: Buffer for GPS drift
+    'gps_grace_count': 0, 'license_verified': False, 'last_verified_ts': 0
 }
 for k, v in defaults.items():
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
 
-# --- 6. AUTH ---
+# --- 7. AUTH ---
 if 'logged_in_user' not in st.session_state:
     st.markdown("<h1 style='text-align: center; margin-top: 50px;'>🛡️ EC PROTOCOL</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
@@ -257,32 +277,50 @@ if 'logged_in_user' not in st.session_state:
             if pin in USERS:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
-                # Force Sync on Login
                 if USERS[pin]['role'] != "Exec":
-                    with st.spinner("SYNCING WITH HQ..."):
-                        force_cloud_sync(pin)
-                        st.session_state.user_state['data_loaded'] = True
-                st.rerun()
+                    # 24-HOUR COMPLIANCE CHECK
+                    with st.spinner("PERFORMING 24H LICENSE & OIG CHECK..."):
+                        is_valid, msg = verify_practitioner(pin, USERS[pin]['role'])
+                        if is_valid:
+                            st.session_state.user_state['license_verified'] = True
+                            st.session_state.user_state['last_verified_ts'] = time.time()
+                            st.toast(msg, icon="✅")
+                            force_cloud_sync(pin)
+                            st.session_state.user_state['data_loaded'] = True
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                            st.stop() # FREEZE ACCOUNT ON LOGIN
+                else:
+                    st.rerun()
             else: st.error("INVALID PIN")
     st.stop()
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 7. CALLBACKS ---
+# --- 8. SECURE CALLBACKS (WITH PRE-CHECK) ---
 def secure_payout_callback():
     current_bal = st.session_state.user_state['earnings']
     if current_bal <= 0.01: return 
+
+    # --- THE 5-SECOND RULE (PSV CHECK) ---
+    is_valid, msg = verify_practitioner(pin, user['role'])
+    if not is_valid:
+        st.toast(f"PAYOUT BLOCKED: {msg}", icon="🚨")
+        return # STOP TRANSACTION
+
     net = current_bal * (1 - sum(TAX_RATES.values()))
     tx_id = log_transaction(pin, net)
     log_history(pin, "PAYOUT", net, "Settled")
     update_cloud_status(pin, "Inactive", 0, 0)
+    
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['last_tx_id'] = tx_id
     st.session_state.user_state['last_payout'] = net
     st.session_state.user_state['payout_success'] = True
 
-# --- 8. APP UI ---
+# --- 9. APP UI ---
 with st.sidebar:
     st.markdown("### 🧭 NAVIGATION")
     nav_selection = st.radio("GO TO:", ["LIVE DASHBOARD", "MARKETPLACE", "SCHEDULER", "LOGS"])
@@ -291,6 +329,14 @@ with st.sidebar:
         st.caption("ADMIN OVERRIDE")
         dev_override = st.checkbox("FORCE GPS VIRTUALIZATION")
         st.markdown("---")
+    
+    # LICENSE STATUS INDICATOR
+    if st.session_state.user_state.get('license_verified'):
+        st.markdown("✅ **LICENSE: ACTIVE**")
+        st.caption(f"Verified: {time.strftime('%H:%M', time.localtime(st.session_state.user_state['last_verified_ts']))}")
+    else:
+        st.markdown("⚠️ **LICENSE: UNVERIFIED**")
+
     if st.button("LOGOUT"):
         st.session_state.clear()
         st.rerun()
@@ -310,7 +356,6 @@ else:
         loc = get_geolocation(component_key=f"gps_{count}")
         ip = get_current_ip()
         
-        # GEO LOGIC
         gps_valid = False
         dist = 99999
         if loc:
@@ -324,11 +369,9 @@ else:
         cls = "safe-mode" if gps_valid else "danger-mode"
         st.markdown(f'<div class="status-pill {cls}">{msg}</div>', unsafe_allow_html=True)
         
-        # --- ROBUST AUTO LOGOUT (Grace Period) ---
         if st.session_state.user_state['active'] and not gps_valid:
-            # Add a buffer so 1 failed GPS signal doesn't kill the session
             st.session_state.user_state['gps_grace_count'] += 1
-            if st.session_state.user_state['gps_grace_count'] > 3: # 3 strikes (30 seconds)
+            if st.session_state.user_state['gps_grace_count'] > 3:
                 st.session_state.user_state['active'] = False
                 st.session_state.user_state['bio_auth_passed'] = False
                 update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
@@ -336,12 +379,11 @@ else:
                 st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
                 st.rerun()
         else:
-            st.session_state.user_state['gps_grace_count'] = 0 # Reset buffer if signal is good
+            st.session_state.user_state['gps_grace_count'] = 0
 
         active = st.session_state.user_state['active']
         earnings = st.session_state.user_state['earnings']
         
-        # Calculate Real-Time Earnings
         if active:
             start_t = st.session_state.user_state['start_time']
             if start_t > 0:
@@ -360,9 +402,7 @@ else:
         
         st.markdown("###")
         
-        # --- UI STATE CONTROL (PREVENTS CONCURRENT CLICKS) ---
         if active:
-            # USER IS CLOCKED IN -> SHOW CLOCK OUT ONLY
             if st.session_state.user_state['show_camera_out']:
                 st.info("📸 BIO-HASH VERIFICATION REQUIRED")
                 img = st.camera_input("SCAN FACE")
@@ -382,7 +422,6 @@ else:
                     st.session_state.user_state['show_camera_out'] = True
                     st.rerun()
         else:
-            # USER IS CLOCKED OUT -> SHOW CLOCK IN ONLY
             if gps_valid:
                 if st.session_state.user_state['show_camera_in']:
                     st.info("📸 BIO-HASH VERIFICATION REQUIRED")
@@ -409,6 +448,7 @@ else:
         st.markdown("###")
         
         if not active and earnings > 0.01:
+            st.info("ℹ️ VALIDATING NURSYS/NBRC STATUS...") # UI Feedback
             st.button(f"💸 PAYOUT ${net:,.2f}", on_click=secure_payout_callback)
         
         if st.session_state.user_state.get('payout_success'):
