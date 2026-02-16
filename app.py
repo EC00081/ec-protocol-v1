@@ -407,8 +407,8 @@ else:
             
             # Download Button (Encoded to avoid page reload issues)
             b64 = base64.b64encode(receipt_html.encode()).decode()
-            href = f'<a href="data:text/html;base64,{b64}" download="PAY_STUB_{st.session_state.user_state["last_tx_id"]}.html" style="text-decoration:none;">'
-            href += '<button style="width:100%; height:50px; background:#4CAF50; color:white; border:none; border-radius:10px; font-weight:bold; cursor:pointer;">📥 DOWNLOAD OFFICIAL RECEIPT</button></a>'
+            href = f'<a href="data:text/html;base64,{b64}" download="PAY_STUB.html">'
+            href += '<button style="width:100%; height:50px; background:#4CAF50; color:white; border:none; border-radius:10px;">📥 DOWNLOAD OFFICIAL RECEIPT</button></a>'
             st.markdown(href, unsafe_allow_html=True)
 
     elif nav_selection == "SCHEDULER":
@@ -425,7 +425,9 @@ else:
         try:
             client = get_db_connection()
             if client:
-                data = client.open("ec_database").worksheet("schedule").get_all_records()
+                # SAFE LOADING OF DATA
+                sheet = client.open("ec_database").worksheet("schedule")
+                data = sheet.get_all_records()
                 my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
                 if my_data: st.dataframe(pd.DataFrame(my_data))
                 else: st.info("No Shifts")
@@ -437,6 +439,13 @@ else:
             client = get_db_connection()
             if client:
                 st.write("Transactions")
-                st.dataframe(pd.DataFrame(client.open("ec_database").worksheet("transactions").get_all_records()))
+                # SAFE MULTI-LINE LOADING
+                tx_sheet = client.open("ec_database").worksheet("transactions")
+                st.dataframe(pd.DataFrame(tx_sheet.get_all_records()))
+                
                 st.write("Activity")
-                st.dataframe(pd.DataFrame(client.open("
+                hx_sheet = client.open("ec_database").worksheet("history")
+                st.dataframe(pd.DataFrame(hx_sheet.get_all_records()))
+        except: st.write("No Data")
+
+# --- END OF FILE ---
