@@ -5,6 +5,7 @@ import math
 import requests
 import pytz
 import base64
+import uuid
 from datetime import datetime, timedelta
 from streamlit_js_eval import get_geolocation
 import gspread
@@ -19,7 +20,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# PWA & STYLING INJECTION
 st.markdown("""
     <head>
         <meta name="apple-mobile-web-app-capable" content="yes">
@@ -34,11 +34,7 @@ st.markdown("""
         color: #FFFFFF;
         font-family: 'Inter', sans-serif;
     }
-    div[data-testid="stMap"] {
-        border-radius: 16px;
-        overflow: hidden;
-        border: 1px solid rgba(255,255,255,0.2);
-    }
+    div[data-testid="stMap"] { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2); }
     .status-pill {
         display: flex; align-items: center; justify-content: center;
         padding: 12px; border-radius: 50px; font-weight: 600;
@@ -49,9 +45,7 @@ st.markdown("""
     div[data-testid="metric-container"] {
         background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px;
     }
-    .stButton>button {
-        width: 100%; height: 60px; border-radius: 12px; font-weight: 700; border: none;
-    }
+    .stButton>button { width: 100%; height: 60px; border-radius: 12px; font-weight: 700; border: none; }
     .hero-header {
         text-align: center; padding: 30px 20px;
         background: linear-gradient(180deg, rgba(14,17,23,0) 0%, rgba(14,17,23,1) 100%), 
@@ -62,13 +56,13 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. CONSTANTS & USERS ---
-GEOFENCE_RADIUS = 300 
+GEOFENCE_RADIUS = 30 # 🔒 TIGHTENED TO 30 METERS
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 
 USERS = {
-    "1001": {"name": "Liam O'Neil", "role": "RT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
-    "1002": {"name": "Charles Morgan", "role": "RN", "rate": 90.00, "lat": 42.3372, "lon": -71.1064, "location": "Boston Children's"},
+    "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
+    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"}, # UPDATED: Now RRT & Same Hospital
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
@@ -143,6 +137,30 @@ def log_schedule(pin, d, s, e):
         except: return False
     return False
 
+# --- MARKETPLACE FUNCTIONS ---
+def post_shift_to_market(pin, role, d, s, e, rate):
+    client = get_db_connection()
+    if client:
+        try:
+            shift_id = str(uuid.uuid4())[:8]
+            sheet = client.open("ec_database").worksheet("marketplace")
+            sheet.append_row([shift_id, str(pin), role, str(d), str(s), str(e), str(rate), "OPEN"])
+            return True
+        except: return False
+    return False
+
+def claim_shift(shift_id, claimer_pin):
+    client = get_db_connection()
+    if client:
+        try:
+            sheet = client.open("ec_database").worksheet("marketplace")
+            cell = sheet.find(shift_id)
+            sheet.update_cell(cell.row, 8, f"CLAIMED BY {claimer_pin}")
+            return True
+        except: return False
+    return False
+
+# --- RECEIPT GENERATOR ---
 def create_receipt_html(user_name, amount, tx_id):
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html = f"""
@@ -172,21 +190,22 @@ def create_receipt_html(user_name, amount, tx_id):
                 <div class="line"></div>
                 <div class="row total"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <div class="line"></div>
-                <div class="footer">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v80.0</div>
+                <div class="footer">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v82.0</div>
             </div>
         </body>
     </html>
     """
     return html
 
-# --- 5. INITIALIZATION ---
+# --- 4. INITIALIZATION ---
 if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
     st.session_state.user_state = {
         'active': False, 'start_time': 0.0, 'earnings': 0.0, 
-        'locked': False, 'payout_success': False, 'data_loaded': False, 'last_tx_id': None, 'last_payout': 0.0
+        'locked': False, 'payout_success': False, 'data_loaded': False, 
+        'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False
     }
 
-# --- 6. AUTHENTICATION ---
+# --- 5. AUTHENTICATION ---
 if 'logged_in_user' not in st.session_state:
     st.markdown("<h1 style='text-align: center; margin-top: 50px;'>🛡️ EC PROTOCOL</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
@@ -202,11 +221,13 @@ if 'logged_in_user' not in st.session_state:
                         st.session_state.user_state['active'] = True
                         st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
                         st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
+                        st.session_state.user_state['bio_auth_passed'] = True # Assume passed if already active
                     st.session_state.user_state['data_loaded'] = True
                 st.rerun()
             else: st.error("INVALID PIN")
     st.stop()
-    # --- 7. MAIN APP (PART 2) ---
+
+# --- 6. MAIN APP ---
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
@@ -214,10 +235,9 @@ pin = st.session_state.pin
 dev_override = False
 with st.sidebar:
     st.markdown("### 🧭 NAVIGATION")
-    nav_selection = st.radio("GO TO:", ["LIVE DASHBOARD", "SCHEDULER", "LOGS"])
+    nav_selection = st.radio("GO TO:", ["LIVE DASHBOARD", "MARKETPLACE", "SCHEDULER", "LOGS"])
     st.markdown("---")
     
-    # 🔒 RESTRICTED DEV TOOLS (ONLY 1001)
     if str(pin) == "1001":
         st.caption("ADMIN OVERRIDE")
         dev_override = st.checkbox("FORCE GPS VIRTUALIZATION")
@@ -229,20 +249,15 @@ with st.sidebar:
 
 # *** CONTENT ROUTER ***
 if user['role'] == "Exec":
-    # === CFO GOD VIEW ===
     st.title("COMMAND CENTER")
-    
-    # Auto-refresh for live map
     st_autorefresh(interval=30000, key="cfo_refresh")
     
     client = get_db_connection()
     if client:
-        # Fetch Live Data
         sheet = client.open("ec_database").worksheet("workers")
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # Calculate Burn Rate
         active_count = 0
         current_burn = 0.0
         map_data = []
@@ -251,38 +266,27 @@ if user['role'] == "Exec":
             if str(row.get('status')).lower() == 'active':
                 active_count += 1
                 try:
-                    # Calculate live earnings for burn rate
                     start = float(row.get('start_time', 0))
                     saved = float(row.get('earnings', 0))
-                    # Find user rate from constant
                     u_pin = str(row.get('pin'))
                     rate = USERS.get(u_pin, {}).get('rate', 0)
-                    
-                    # Add current session cost
                     session_cost = ((time.time() - start) / 3600) * rate
                     current_burn += (saved + session_cost)
-                    
-                    # Add to Map
                     u_lat = USERS.get(u_pin, {}).get('lat')
                     u_lon = USERS.get(u_pin, {}).get('lon')
                     if u_lat and u_lon:
                         map_data.append({'lat': u_lat, 'lon': u_lon})
                 except: pass
 
-        # 1. LIVE METRICS
         c1, c2, c3 = st.columns(3)
         c1.metric("ACTIVE UNITS", active_count)
         c2.metric("CURRENT BURN", f"${current_burn:,.2f}")
         c3.metric("SYSTEM STATUS", "ONLINE", delta="Stable")
         
-        # 2. SATELLITE MAP
         st.markdown("### 🛰️ LIVE DEPLOYMENT MAP")
-        if map_data:
-            st.map(pd.DataFrame(map_data), zoom=10)
-        else:
-            st.info("NO ACTIVE UNITS DEPLOYED")
+        if map_data: st.map(pd.DataFrame(map_data), zoom=10)
+        else: st.info("NO ACTIVE UNITS DEPLOYED")
             
-        # 3. ROSTER
         st.markdown("### 📋 ACTIVE ROSTER")
         st.dataframe(df)
 
@@ -292,20 +296,18 @@ else:
         <div class="hero-header">
             <h2 style='margin:0;'>EC ENTERPRISE</h2>
             <div style='background:rgba(255, 255, 255, 0.1); color:#FFFFFF; padding:5px 15px; border-radius:20px; display:inline-block; margin-top:10px; border: 1px solid rgba(255,255,255,0.2); font-weight: bold;'>
-                OPERATOR: {user['name'].upper()}
+                OPERATOR: {user['name'].upper()} ({user['role']})
             </div>
         </div>
     """, unsafe_allow_html=True)
 
     if nav_selection == "LIVE DASHBOARD":
         count = st_autorefresh(interval=10000, key="pulse")
-        
         loc = get_geolocation(component_key=f"gps_{count}")
         ip = get_current_ip()
         
         target_lat = user.get('lat', 0)
         target_lon = user.get('lon', 0)
-        
         dist = 99999
         if loc:
             try:
@@ -329,6 +331,7 @@ else:
         
         if st.session_state.user_state['active'] and not is_inside:
             st.session_state.user_state['active'] = False
+            st.session_state.user_state['bio_auth_passed'] = False
             update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
             log_history(pin, "AUTO-LOGOUT", st.session_state.user_state['earnings'], "Geofence Exit")
             st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
@@ -341,38 +344,50 @@ else:
             st.session_state.user_state['start_time'] = time.time() 
             st.session_state.user_state['earnings'] = earnings
 
-        net = earnings * (1 - sum(TAX_RATES.values()))
+        gross = earnings
+        tax_held = earnings * 0.3465
+        net = earnings * (1 - 0.3465)
         
-        c1, c2 = st.columns(2)
-        c1.metric("GROSS", f"${earnings:,.2f}")
-        c2.metric("NET", f"${net:,.2f}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("GROSS", f"${gross:,.2f}")
+        c2.metric("🔒 TAX VAULT", f"${tax_held:,.2f}") # THE VAULT
+        c3.metric("NET AVAIL", f"${net:,.2f}")
         
         st.markdown("###")
+        
+        # --- BIO-AUTH LOGIC ---
         if active:
             if st.button("🔴 END SHIFT"):
                 st.session_state.user_state['active'] = False
+                st.session_state.user_state['bio_auth_passed'] = False
                 update_cloud_status(pin, "Inactive", 0, earnings)
                 log_history(pin, "CLOCK OUT", earnings, "Manual")
                 st.rerun()
         else:
             if is_inside:
-                if st.button("🟢 START SHIFT"):
-                    st.session_state.user_state['active'] = True
-                    st.session_state.user_state['start_time'] = time.time()
-                    update_cloud_status(pin, "Active", time.time(), earnings)
-                    log_history(pin, "CLOCK IN", earnings, f"IP: {ip}")
-                    st.rerun()
+                if not st.session_state.user_state['bio_auth_passed']:
+                    st.info("📷 BIO-METRIC SCAN REQUIRED TO UNLOCK")
+                    img = st.camera_input("VERIFY IDENTITY")
+                    if img:
+                        st.session_state.user_state['bio_auth_passed'] = True
+                        st.rerun()
+                else:
+                    if st.button("🟢 AUTHORIZE & START SHIFT"):
+                        st.session_state.user_state['active'] = True
+                        st.session_state.user_state['start_time'] = time.time()
+                        update_cloud_status(pin, "Active", time.time(), earnings)
+                        log_history(pin, "CLOCK IN", earnings, f"IP: {ip}")
+                        st.rerun()
             else:
                 st.info(f"📍 PROCEED TO {user.get('location').upper()}")
         
         st.markdown("###")
         if not active and earnings > 0.01:
-            if st.button("💸 PAYOUT"):
+            if st.button(f"💸 PAYOUT ${net:,.2f}"):
                 tx_id = log_transaction(pin, net)
                 log_history(pin, "PAYOUT", net, "Settled")
                 update_cloud_status(pin, "Inactive", 0, 0)
                 
-                # Store payout data for receipt
                 st.session_state.user_state['earnings'] = 0.0
                 st.session_state.user_state['last_tx_id'] = tx_id
                 st.session_state.user_state['last_payout'] = net
@@ -381,22 +396,61 @@ else:
                 st.balloons()
                 st.rerun()
         
-        # RECEIPT DOWNLOADER
         if st.session_state.user_state.get('payout_success'):
             st.success("TRANSFER COMPLETE")
-            
-            # Generate Receipt HTML
             receipt_html = create_receipt_html(
                 user['name'], 
                 st.session_state.user_state['last_payout'], 
                 st.session_state.user_state['last_tx_id']
             )
-            
-            # Download Button (Encoded to avoid page reload issues)
             b64 = base64.b64encode(receipt_html.encode()).decode()
             href = f'<a href="data:text/html;base64,{b64}" download="PAY_STUB.html">'
             href += '<button style="width:100%; height:50px; background:#4CAF50; color:white; border:none; border-radius:10px;">📥 DOWNLOAD OFFICIAL RECEIPT</button></a>'
             st.markdown(href, unsafe_allow_html=True)
+    
+    # === NEW: MARKETPLACE ===
+    elif nav_selection == "MARKETPLACE":
+        st.markdown("### 🏥 SHIFT MARKETPLACE")
+        st.info(f"BROWSING FOR ROLE: **{user['role']}**")
+        
+        tab1, tab2 = st.tabs(["BROWSE SHIFTS", "POST SHIFT"])
+        
+        with tab1:
+            try:
+                client = get_db_connection()
+                if client:
+                    sheet = client.open("ec_database").worksheet("marketplace")
+                    data = sheet.get_all_records()
+                    
+                    # FILTER: Only show matching roles & OPEN status
+                    available = [x for x in data if x.get('role') == user['role'] and x.get('status') == "OPEN"]
+                    
+                    if available:
+                        for shift in available:
+                            with st.expander(f"📅 {shift['date']} | {shift['start']} - {shift['end']} (${shift['rate']}/hr)"):
+                                st.caption(f"POSTED BY: {shift['poster_pin']}")
+                                if st.button(f"CLAIM SHIFT ({shift['id']})"):
+                                    if claim_shift(shift['id'], pin):
+                                        st.success("SHIFT CLAIMED!")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error("ERROR CLAIMING")
+                    else:
+                        st.info("NO SHIFTS AVAILABLE FOR YOUR CREDENTIALS")
+            except: st.write("Marketplace DB Not Found. Create 'marketplace' tab in Sheets.")
+
+        with tab2:
+            with st.form("post_shift"):
+                c1, c2 = st.columns(2)
+                d = c1.date_input("Date")
+                rate = c2.number_input("Hourly Rate ($)", value=user['rate'])
+                s = c1.time_input("Start")
+                e = c2.time_input("End")
+                if st.form_submit_button("POST SHIFT TO MARKET"):
+                    if post_shift_to_market(pin, user['role'], d, s, e, rate):
+                        st.success("SHIFT POSTED")
+                    else: st.error("DB Error")
 
     elif nav_selection == "SCHEDULER":
         st.markdown("### 📅 Rolling Schedule")
@@ -414,12 +468,10 @@ else:
             if client:
                 sheet = client.open("ec_database").worksheet("schedule")
                 data = sheet.get_all_records()
-                # SAFE FILTERING
                 my_data = []
                 for x in data:
                     if str(x.get('pin')).strip() == str(pin).strip():
                         my_data.append(x)
-                        
                 if my_data: st.dataframe(pd.DataFrame(my_data))
                 else: st.info("No Shifts")
         except: st.write("DB Error")
@@ -430,7 +482,6 @@ else:
             client = get_db_connection()
             if client:
                 st.write("Transactions")
-                # SAFE MULTI-LINE LOADING
                 tx_sheet = client.open("ec_database").worksheet("transactions")
                 st.dataframe(pd.DataFrame(tx_sheet.get_all_records()))
                 
@@ -438,5 +489,3 @@ else:
                 hx_sheet = client.open("ec_database").worksheet("history")
                 st.dataframe(pd.DataFrame(hx_sheet.get_all_records()))
         except: st.write("No Data")
-
-# --- END OF FILE ---
