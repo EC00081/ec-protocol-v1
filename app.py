@@ -29,21 +29,16 @@ st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    
     .stApp {
         background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117);
         color: #FFFFFF;
         font-family: 'Inter', sans-serif;
     }
-    
-    /* MAP STYLING */
     div[data-testid="stMap"] {
         border-radius: 16px;
         overflow: hidden;
         border: 1px solid rgba(255,255,255,0.2);
     }
-    
-    /* STATUS PILL */
     .status-pill {
         display: flex; align-items: center; justify-content: center;
         padding: 12px; border-radius: 50px; font-weight: 600;
@@ -51,18 +46,12 @@ st.markdown("""
     }
     .safe-mode { background: rgba(28, 79, 46, 0.4); border: 1px solid #2e7d32; color: #4caf50; }
     .danger-mode { background: rgba(79, 28, 28, 0.4); border: 1px solid #c62828; color: #ff5252; }
-    
-    /* METRICS */
     div[data-testid="metric-container"] {
         background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px;
     }
-    
-    /* BUTTONS */
     .stButton>button {
         width: 100%; height: 60px; border-radius: 12px; font-weight: 700; border: none;
     }
-    
-    /* HEADER */
     .hero-header {
         text-align: center; padding: 30px 20px;
         background: linear-gradient(180deg, rgba(14,17,23,0) 0%, rgba(14,17,23,1) 100%), 
@@ -154,7 +143,6 @@ def log_schedule(pin, d, s, e):
         except: return False
     return False
 
-# --- 4. RECEIPT GENERATOR (HTML) ---
 def create_receipt_html(user_name, amount, tx_id):
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html = f"""
@@ -218,8 +206,7 @@ if 'logged_in_user' not in st.session_state:
                 st.rerun()
             else: st.error("INVALID PIN")
     st.stop()
-
-# --- 7. MAIN APP ---
+    # --- 7. MAIN APP (PART 2) ---
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
@@ -425,10 +412,14 @@ else:
         try:
             client = get_db_connection()
             if client:
-                # SAFE LOADING OF DATA
                 sheet = client.open("ec_database").worksheet("schedule")
                 data = sheet.get_all_records()
-                my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
+                # SAFE FILTERING
+                my_data = []
+                for x in data:
+                    if str(x.get('pin')).strip() == str(pin).strip():
+                        my_data.append(x)
+                        
                 if my_data: st.dataframe(pd.DataFrame(my_data))
                 else: st.info("No Shifts")
         except: st.write("DB Error")
