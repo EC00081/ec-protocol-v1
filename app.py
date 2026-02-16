@@ -29,6 +29,7 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stApp { background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117); color: #FFFFFF; font-family: 'Inter', sans-serif; }
+    div[data-testid="stMap"] { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2); }
     .status-pill { display: flex; align-items: center; justify-content: center; padding: 12px; border-radius: 50px; font-weight: 600; margin-bottom: 20px; backdrop-filter: blur(10px); }
     .safe-mode { background: rgba(28, 79, 46, 0.4); border: 1px solid #2e7d32; color: #4caf50; }
     .danger-mode { background: rgba(79, 28, 28, 0.4); border: 1px solid #c62828; color: #ff5252; }
@@ -38,10 +39,16 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. CONSTANTS ---
-GEOFENCE_RADIUS = 30
+# --- 2. CONSTANTS & TIME ZONES ---
+GEOFENCE_RADIUS = 30 
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
+
+# 🕒 TIME ZONE CONTROL (EST)
 LOCAL_TZ = pytz.timezone('US/Eastern')
+
+def get_local_now():
+    """Returns current time in EST as a formatted string."""
+    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
@@ -85,9 +92,9 @@ def update_cloud_status(pin, status, start, earn):
                 sheet.update_cell(cell.row, 2, status)
                 sheet.update_cell(cell.row, 3, str(start))
                 sheet.update_cell(cell.row, 4, str(earn))
-                sheet.update_cell(cell.row, 5, str(datetime.now()))
+                sheet.update_cell(cell.row, 5, get_local_now()) # Log EST
             except:
-                sheet.append_row([str(pin), status, str(start), str(earn), str(datetime.now())])
+                sheet.append_row([str(pin), status, str(start), str(earn), get_local_now()])
         except: pass
 
 def log_transaction(pin, amount):
@@ -96,7 +103,8 @@ def log_transaction(pin, amount):
     if client:
         try:
             sheet = client.open("ec_database").worksheet("transactions")
-            sheet.append_row([tx_id, str(pin), f"${amount:.2f}", str(datetime.now()), "INSTANT"])
+            # Log with Local EST Time
+            sheet.append_row([tx_id, str(pin), f"${amount:.2f}", get_local_now(), "INSTANT"])
         except: pass
     return tx_id
 
@@ -105,15 +113,18 @@ def log_history(pin, action, amount, note):
     if client:
         try:
             sheet = client.open("ec_database").worksheet("history")
-            sheet.append_row([str(pin), action, str(datetime.now()), f"${amount:.2f}", note])
+            # Log with Local EST Time
+            sheet.append_row([str(pin), action, get_local_now(), f"${amount:.2f}", note])
         except: pass
 
 def log_schedule(pin, d, s, e):
     client = get_db_connection()
     if client:
         try:
-            dt_s = LOCAL_TZ.localize(datetime.combine(d, s)).astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            dt_e = LOCAL_TZ.localize(datetime.combine(d, e)).astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            # Combine Date + Time and treat as EST
+            dt_s = datetime.combine(d, s).strftime("%Y-%m-%d %H:%M:%S EST")
+            dt_e = datetime.combine(d, e).strftime("%Y-%m-%d %H:%M:%S EST")
+            
             sheet = client.open("ec_database").worksheet("schedule")
             sheet.append_row([str(pin), str(d), dt_s, dt_e, "Scheduled"])
             return True
@@ -125,8 +136,12 @@ def post_shift_to_market(pin, role, d, s, e, rate):
     if client:
         try:
             shift_id = str(uuid.uuid4())[:8]
+            # Convert times to string directly (Input assumes EST)
+            s_str = s.strftime("%H:%M EST")
+            e_str = e.strftime("%H:%M EST")
+            
             sheet = client.open("ec_database").worksheet("marketplace")
-            sheet.append_row([shift_id, str(pin), role, str(d), str(s), str(e), str(rate), "OPEN"])
+            sheet.append_row([shift_id, str(pin), role, str(d), s_str, e_str, str(rate), "OPEN"])
             return True
         except: return False
     return False
@@ -143,7 +158,7 @@ def claim_shift(shift_id, claimer_pin):
     return False
 
 def create_receipt_html(user_name, amount, tx_id):
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    date_str = get_local_now() # Use EST
     html = f"""
     <html>
         <body style="font-family: monospace; padding: 40px; color: #333;">
@@ -157,7 +172,7 @@ def create_receipt_html(user_name, amount, tx_id):
                 <hr style="border: 1px dashed #333;">
                 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v83.0</div>
+                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v84.0</div>
             </div>
         </body>
     </html>
@@ -170,7 +185,7 @@ defaults = {
     'active': False, 'start_time': 0.0, 'earnings': 0.0, 
     'payout_success': False, 'data_loaded': False, 
     'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False,
-    'show_camera_in': False, 'show_camera_out': False # TOGGLES FOR CAMERA
+    'show_camera_in': False, 'show_camera_out': False
 }
 for k, v in defaults.items():
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
@@ -202,17 +217,14 @@ pin = st.session_state.pin
 
 # --- 6. CRITICAL CALLBACKS (ANTI-FRAUD) ---
 def secure_payout_callback():
-    # MUTEX LOCK: Only run if earnings exist
     current_bal = st.session_state.user_state['earnings']
-    if current_bal <= 0.01:
-        return # STOP FRAUD
+    if current_bal <= 0.01: return 
 
     net = current_bal * (1 - sum(TAX_RATES.values()))
     tx_id = log_transaction(pin, net)
     log_history(pin, "PAYOUT", net, "Settled")
     update_cloud_status(pin, "Inactive", 0, 0)
     
-    # UPDATE STATE INSTANTLY
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['last_tx_id'] = tx_id
     st.session_state.user_state['last_payout'] = net
@@ -265,6 +277,7 @@ else:
         
         if st.session_state.user_state['active'] and not is_inside:
             st.session_state.user_state['active'] = False
+            st.session_state.user_state['bio_auth_passed'] = False
             update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
             log_history(pin, "AUTO-LOGOUT", st.session_state.user_state['earnings'], "Geofence Exit")
             st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
@@ -288,15 +301,13 @@ else:
         
         st.markdown("###")
         
-        # --- NEW CAMERA LOGIC (ON DEMAND ONLY) ---
         if active:
-            # CLOCK OUT FLOW
             if st.session_state.user_state['show_camera_out']:
                 st.info("📸 VERIFY IDENTITY TO END SHIFT")
                 img = st.camera_input("SCAN FACE")
                 if img:
                     st.session_state.user_state['active'] = False
-                    st.session_state.user_state['show_camera_out'] = False # Hide camera
+                    st.session_state.user_state['show_camera_out'] = False 
                     update_cloud_status(pin, "Inactive", 0, earnings)
                     log_history(pin, "CLOCK OUT", earnings, "Verified")
                     st.rerun()
@@ -308,7 +319,6 @@ else:
                     st.session_state.user_state['show_camera_out'] = True
                     st.rerun()
         else:
-            # CLOCK IN FLOW
             if is_inside:
                 if st.session_state.user_state['show_camera_in']:
                     st.info("📸 VERIFY IDENTITY TO START SHIFT")
@@ -316,7 +326,7 @@ else:
                     if img:
                         st.session_state.user_state['active'] = True
                         st.session_state.user_state['start_time'] = time.time()
-                        st.session_state.user_state['show_camera_in'] = False # Hide camera
+                        st.session_state.user_state['show_camera_in'] = False
                         update_cloud_status(pin, "Active", time.time(), earnings)
                         log_history(pin, "CLOCK IN", earnings, f"Verified IP: {ip}")
                         st.rerun()
@@ -331,7 +341,6 @@ else:
                 st.info(f"📍 PROCEED TO {user.get('location').upper()}")
         
         st.markdown("###")
-        # --- SECURE PAYOUT ---
         if not active and earnings > 0.01:
             st.button(f"💸 PAYOUT ${net:,.2f}", on_click=secure_payout_callback)
         
@@ -349,7 +358,7 @@ else:
     
     elif nav_selection == "MARKETPLACE":
         st.markdown("### 🏥 SHIFT MARKETPLACE")
-        st.info(f"BROWSING FOR ROLE: **{user['role']}**")
+        st.info(f"BROWSING FOR ROLE: **{user['role']}** (EST)")
         tab1, tab2 = st.tabs(["BROWSE SHIFTS", "POST SHIFT"])
         with tab1:
             try:
@@ -372,17 +381,20 @@ else:
             except: st.write("Marketplace DB Not Found.")
         with tab2:
             with st.form("post_shift"):
+                st.caption(f"POSTING AS: {user['name']} (Rate: ${user['rate']}/hr)")
                 c1, c2 = st.columns(2)
                 d = c1.date_input("Date")
-                rate = c2.number_input("Hourly Rate ($)", value=user['rate'])
-                s = c1.time_input("Start")
-                e = c2.time_input("End")
+                s = c1.time_input("Start (EST)")
+                e = c2.time_input("End (EST)")
+                
+                # RATE IS FIXED - NO INPUT
                 if st.form_submit_button("POST SHIFT TO MARKET"):
-                    if post_shift_to_market(pin, user['role'], d, s, e, rate): st.success("SHIFT POSTED")
+                    if post_shift_to_market(pin, user['role'], d, s, e, user['rate']): 
+                        st.success("SHIFT POSTED")
                     else: st.error("DB Error")
 
     elif nav_selection == "SCHEDULER":
-        st.markdown("### 📅 Rolling Schedule")
+        st.markdown("### 📅 Rolling Schedule (EST)")
         with st.form("sched"):
             c1, c2 = st.columns(2)
             d = c1.date_input("Date")
@@ -394,7 +406,8 @@ else:
         try:
             client = get_db_connection()
             if client:
-                data = client.open("ec_database").worksheet("schedule").get_all_records()
+                sheet = client.open("ec_database").worksheet("schedule")
+                data = sheet.get_all_records()
                 my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
                 if my_data: st.dataframe(pd.DataFrame(my_data))
                 else: st.info("No Shifts")
