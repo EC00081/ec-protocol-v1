@@ -8,3 +8,10 @@ oauth2client
 streamlit-autorefresh
 requests
 shapely
+numpy
+requests
+pytz
+gspread
+cmake
+dlib
+face_recognition
