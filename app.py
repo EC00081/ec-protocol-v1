@@ -62,7 +62,7 @@ LOCAL_TZ = pytz.timezone('US/Eastern')
 
 USERS = {
     "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
-    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"}, # UPDATED: Now RRT & Same Hospital
+    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton"},
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
@@ -190,20 +190,26 @@ def create_receipt_html(user_name, amount, tx_id):
                 <div class="line"></div>
                 <div class="row total"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <div class="line"></div>
-                <div class="footer">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v82.0</div>
+                <div class="footer">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v82.1</div>
             </div>
         </body>
     </html>
     """
     return html
 
-# --- 4. INITIALIZATION ---
-if 'user_state' not in st.session_state or 'data_loaded' not in st.session_state.user_state:
-    st.session_state.user_state = {
-        'active': False, 'start_time': 0.0, 'earnings': 0.0, 
-        'locked': False, 'payout_success': False, 'data_loaded': False, 
-        'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False
-    }
+# --- 4. INITIALIZATION (SELF-HEALING) ---
+if 'user_state' not in st.session_state:
+    st.session_state.user_state = {}
+
+# Patch any missing keys (Fixes the KeyError: 'bio_auth_passed')
+defaults = {
+    'active': False, 'start_time': 0.0, 'earnings': 0.0, 
+    'locked': False, 'payout_success': False, 'data_loaded': False, 
+    'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False
+}
+for key, val in defaults.items():
+    if key not in st.session_state.user_state:
+        st.session_state.user_state[key] = val
 
 # --- 5. AUTHENTICATION ---
 if 'logged_in_user' not in st.session_state:
@@ -221,7 +227,8 @@ if 'logged_in_user' not in st.session_state:
                         st.session_state.user_state['active'] = True
                         st.session_state.user_state['start_time'] = float(cloud.get('start_time', 0))
                         st.session_state.user_state['earnings'] = float(cloud.get('earnings', 0))
-                        st.session_state.user_state['bio_auth_passed'] = True # Assume passed if already active
+                        # Assume authorized if already active from cloud
+                        st.session_state.user_state['bio_auth_passed'] = True 
                     st.session_state.user_state['data_loaded'] = True
                 st.rerun()
             else: st.error("INVALID PIN")
@@ -350,7 +357,7 @@ else:
         
         c1, c2, c3 = st.columns(3)
         c1.metric("GROSS", f"${gross:,.2f}")
-        c2.metric("🔒 TAX VAULT", f"${tax_held:,.2f}") # THE VAULT
+        c2.metric("🔒 TAX VAULT", f"${tax_held:,.2f}") 
         c3.metric("NET AVAIL", f"${net:,.2f}")
         
         st.markdown("###")
@@ -365,7 +372,8 @@ else:
                 st.rerun()
         else:
             if is_inside:
-                if not st.session_state.user_state['bio_auth_passed']:
+                # BIO AUTH CHECK
+                if not st.session_state.user_state.get('bio_auth_passed'):
                     st.info("📷 BIO-METRIC SCAN REQUIRED TO UNLOCK")
                     img = st.camera_input("VERIFY IDENTITY")
                     if img:
@@ -408,7 +416,7 @@ else:
             href += '<button style="width:100%; height:50px; background:#4CAF50; color:white; border:none; border-radius:10px;">📥 DOWNLOAD OFFICIAL RECEIPT</button></a>'
             st.markdown(href, unsafe_allow_html=True)
     
-    # === NEW: MARKETPLACE ===
+    # === MARKETPLACE ===
     elif nav_selection == "MARKETPLACE":
         st.markdown("### 🏥 SHIFT MARKETPLACE")
         st.info(f"BROWSING FOR ROLE: **{user['role']}**")
@@ -421,8 +429,6 @@ else:
                 if client:
                     sheet = client.open("ec_database").worksheet("marketplace")
                     data = sheet.get_all_records()
-                    
-                    # FILTER: Only show matching roles & OPEN status
                     available = [x for x in data if x.get('role') == user['role'] and x.get('status') == "OPEN"]
                     
                     if available:
@@ -468,10 +474,7 @@ else:
             if client:
                 sheet = client.open("ec_database").worksheet("schedule")
                 data = sheet.get_all_records()
-                my_data = []
-                for x in data:
-                    if str(x.get('pin')).strip() == str(pin).strip():
-                        my_data.append(x)
+                my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
                 if my_data: st.dataframe(pd.DataFrame(my_data))
                 else: st.info("No Shifts")
         except: st.write("DB Error")
