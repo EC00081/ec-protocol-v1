@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 import math
-import hashlib
 import requests
 import pytz
 from datetime import datetime, timedelta
@@ -12,14 +11,21 @@ from oauth2client.service_account import ServiceAccountCredentials
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="centered")
+# FORCE SIDEBAR TO BE OPEN BY DEFAULT
+st.set_page_config(
+    page_title="EC Enterprise", 
+    page_icon="🛡️", 
+    layout="centered", 
+    initial_sidebar_state="expanded"
+)
 
 # --- 2. STYLING ---
 st.markdown("""
     <style>
+    /* REMOVED THE HEADER HIDING CODE SO SIDEBAR BUTTON WORKS */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    
     .stApp {
         background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117);
         color: #FFFFFF;
@@ -144,7 +150,6 @@ if 'logged_in_user' not in st.session_state:
             if pin in USERS:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
-                # Pre-load data
                 if USERS[pin]['role'] != "Exec":
                     cloud = get_cloud_state(pin)
                     if cloud and str(cloud.get('status')).lower() == 'active':
@@ -160,8 +165,9 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# *** GLOBAL SIDEBAR (HOISTED) ***
-dev_override = False # Default state
+# *** GLOBAL SIDEBAR ***
+# Rendered immediately after login
+dev_override = False
 with st.sidebar:
     st.markdown("### 🧭 NAVIGATION")
     nav_selection = st.radio("GO TO:", ["LIVE DASHBOARD", "SCHEDULER", "LOGS"])
@@ -170,7 +176,7 @@ with st.sidebar:
     
     # 🔒 RESTRICTED DEV TOOLS (ONLY 1001)
     if str(pin) == "1001":
-        st.caption("DEVELOPER TOOLS (ADMIN ONLY)")
+        st.caption("DEVELOPER TOOLS")
         dev_override = st.checkbox("FORCE GPS OVERRIDE")
         st.markdown("---")
     
@@ -180,15 +186,13 @@ with st.sidebar:
 
 # *** CONTENT ROUTER ***
 if user['role'] == "Exec":
-    # CFO View
     st.title("COMMAND CENTER")
     client = get_db_connection()
     if client:
         st.dataframe(pd.DataFrame(client.open("ec_database").worksheet("workers").get_all_records()))
 
 else:
-    # WORKER VIEW
-    # Updated Header: WHITE TEXT for name visibility
+    # HEADER
     st.markdown(f"""
         <div class="hero-header">
             <h2 style='margin:0;'>EC ENTERPRISE</h2>
@@ -202,7 +206,6 @@ else:
     if nav_selection == "LIVE DASHBOARD":
         count = st_autorefresh(interval=10000, key="pulse")
         
-        # GPS Logic
         loc = get_geolocation(component_key=f"gps_{count}")
         ip = get_current_ip()
         
@@ -222,7 +225,6 @@ else:
 
         is_inside = dist < GEOFENCE_RADIUS or dev_override
         
-        # Banner
         if is_inside:
             msg = "✅ VIRTUAL ZONE" if dev_override else f"✅ SECURE ZONE • {int(dist)}m"
             cls = "safe-mode"
@@ -240,12 +242,11 @@ else:
             st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
             st.rerun()
 
-        # Money Logic
+        # Money
         active = st.session_state.user_state['active']
         earnings = st.session_state.user_state['earnings']
         if active:
             earnings += ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
-            # Reset start time to avoid double counting
             st.session_state.user_state['start_time'] = time.time() 
             st.session_state.user_state['earnings'] = earnings
 
@@ -253,68 +254,5 @@ else:
         
         c1, c2 = st.columns(2)
         c1.metric("GROSS", f"${earnings:,.2f}")
-        c2.metric("NET", f"${net:,.2f}")
+        c2.metric("NET
         
-        st.markdown("###")
-        if active:
-            if st.button("🔴 END SHIFT"):
-                st.session_state.user_state['active'] = False
-                update_cloud_status(pin, "Inactive", 0, earnings)
-                log_history(pin, "CLOCK OUT", earnings, "Manual")
-                st.rerun()
-        else:
-            if is_inside:
-                if st.button("🟢 START SHIFT"):
-                    st.session_state.user_state['active'] = True
-                    st.session_state.user_state['start_time'] = time.time()
-                    update_cloud_status(pin, "Active", time.time(), earnings)
-                    log_history(pin, "CLOCK IN", earnings, f"IP: {ip}")
-                    st.rerun()
-            else:
-                st.info(f"📍 PROCEED TO {user.get('location').upper()}")
-        
-        st.markdown("###")
-        if not active and earnings > 0.01:
-            if st.button("💸 PAYOUT"):
-                log_transaction(pin, net)
-                log_history(pin, "PAYOUT", net, "Settled")
-                update_cloud_status(pin, "Inactive", 0, 0)
-                st.session_state.user_state['earnings'] = 0.0
-                st.balloons()
-                st.success("TRANSFERRED")
-                time.sleep(2)
-                st.rerun()
-
-    # PAGE 2: SCHEDULER
-    elif nav_selection == "SCHEDULER":
-        st.markdown("### 📅 Rolling Schedule")
-        with st.form("sched"):
-            c1, c2 = st.columns(2)
-            d = c1.date_input("Date")
-            s = c1.time_input("Start")
-            e = c2.time_input("End")
-            if st.form_submit_button("Add Shift"):
-                if log_schedule(pin, d, s, e): st.success("Added")
-                else: st.error("Error")
-        
-        # View
-        try:
-            client = get_db_connection()
-            if client:
-                data = client.open("ec_database").worksheet("schedule").get_all_records()
-                my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
-                if my_data: st.dataframe(pd.DataFrame(my_data))
-                else: st.info("No Shifts")
-        except: st.write("DB Error")
-
-    # PAGE 3: LOGS
-    elif nav_selection == "LOGS":
-        st.markdown("### 📂 Logs")
-        try:
-            client = get_db_connection()
-            if client:
-                st.write("Transactions")
-                st.dataframe(pd.DataFrame(client.open("ec_database").worksheet("transactions").get_all_records()))
-                st.write("Activity")
-                st.dataframe(pd.DataFrame(client.open("ec_database").worksheet("history").get_all_records()))
-        except: st.write("No Data")
