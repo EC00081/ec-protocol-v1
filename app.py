@@ -319,6 +319,8 @@ elif nav == "MARKETPLACE":
 elif nav == "LOGS":
     st.title("Audit Logs")
     try:
-        res = run_query("SELECT * FROM history WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        # SHORTENED LINE TO PREVENT SYNTAX ERRORS
+        query = "SELECT * FROM history WHERE pin=:p ORDER BY timestamp DESC"
+        res = run_query(query, {"p": pin})
         if res: st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
     except: st.write("No History")
