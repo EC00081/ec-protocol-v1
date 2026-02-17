@@ -13,6 +13,19 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit_autorefresh import st_autorefresh
 
+# --- 0. LIGHTWEIGHT LIBRARY LOADER ---
+try:
+    import face_recognition
+    from shapely.geometry import Point, Polygon
+    BIO_ENGINE_AVAILABLE = True
+except ImportError:
+    BIO_ENGINE_AVAILABLE = False
+    class Point:
+        def __init__(self, x, y): self.x, self.y = x, y
+    class Polygon:
+        def __init__(self, points): self.points = points
+        def contains(self, point): return True 
+
 # --- 1. CONFIGURATION ---
 st.set_page_config(
     page_title="EC Enterprise", 
@@ -21,7 +34,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# UI STYLING
 st.markdown("""
     <head>
         <meta name="apple-mobile-web-app-capable" content="yes">
@@ -35,24 +47,20 @@ st.markdown("""
     .status-pill { display: flex; align-items: center; justify-content: center; padding: 12px; border-radius: 50px; font-weight: 600; margin-bottom: 20px; backdrop-filter: blur(10px); }
     .safe-mode { background: rgba(28, 79, 46, 0.4); border: 1px solid #2e7d32; color: #4caf50; }
     .danger-mode { background: rgba(79, 28, 28, 0.4); border: 1px solid #c62828; color: #ff5252; }
+    .vip-mode { background: rgba(255, 215, 0, 0.2); border: 1px solid #FFD700; color: #FFD700; }
     div[data-testid="metric-container"] { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; }
     .stButton>button { width: 100%; height: 60px; border-radius: 12px; font-weight: 700; border: none; }
     .hero-header { text-align: center; padding: 30px 20px; background: linear-gradient(180deg, rgba(14,17,23,0) 0%, rgba(14,17,23,1) 100%), url("https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2670&auto=format&fit=crop"); background-size: cover; border-radius: 0 0 24px 24px; margin-top: -60px; margin-bottom: 30px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. CONSTANTS & SECURITY ---
+# --- 2. CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
-GEOFENCE_RADIUS = 45 
-
-# LIVENESS CHALLENGES (SIMON SAYS)
+GEOFENCE_RADIUS = 45
 LIVENESS_CHALLENGES = [
-    "TOUCH YOUR LEFT EAR",
-    "LOOK UP AT THE CEILING",
-    "GIVE A THUMBS UP",
-    "TOUCH YOUR NOSE",
-    "COVER YOUR MOUTH"
+    "TOUCH YOUR LEFT EAR", "LOOK UP AT THE CEILING", 
+    "GIVE A THUMBS UP", "TOUCH YOUR NOSE", "COVER YOUR MOUTH"
 ]
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
@@ -63,9 +71,12 @@ USERS = {
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- 3. SECURITY & LOGIC ENGINE ---
-def verify_geofence(user_lat, user_lon):
-    # Standard Radius Check (Lightweight)
+# --- 3. SECURITY ENGINE (VIP vs IRON DOME) ---
+def verify_geofence(user_lat, user_lon, pin):
+    # VIP BYPASS (1001)
+    if str(pin) == "1001": return True
+    
+    # IRON DOME (Everyone Else)
     target_lat = 42.0875
     target_lon = -70.9915
     R = 6371000
@@ -75,19 +86,39 @@ def verify_geofence(user_lat, user_lon):
     dist = R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
     return dist < GEOFENCE_RADIUS
 
-def verify_ip_address(user_ip):
-    # In a real deployment, this list would be the Hospital's static IP range
-    # For now, we allow all (Dev Mode) but log the check
-    ALLOWED_IPS = ["127.0.0.1"] 
-    return True # Always True for Demo to prevent lockout
+def verify_ip_address(user_ip, pin):
+    # VIP BYPASS (1001)
+    if str(pin) == "1001": return True
+    
+    # IRON DOME Check (Simulated IP Range)
+    return True # In Pilot, check "192.168.1.x"
 
 def verify_practitioner_status(pin):
-    """Simulates API call to Nursys/NBRC"""
-    time.sleep(1) # Latency
-    # Mock Database
-    if str(pin) in ["1001", "1002"]:
-        return True, "LICENSE ACTIVE"
+    # VIP: Instant Pass
+    if str(pin) == "1001": return True, "VIP CLEARANCE"
+    
+    # IRON DOME: Simulation Latency
+    time.sleep(1.5) 
+    if str(pin) in ["1002"]: return True, "LICENSE ACTIVE"
     return False, "LICENSE EXPIRED/SUSPENDED"
+
+def process_biometric_hash(image_upload, pin):
+    # VIP BYPASS (1001)
+    if str(pin) == "1001":
+        return True, "VIP BYPASS"
+
+    # IRON DOME (Strict)
+    if not BIO_ENGINE_AVAILABLE:
+        time.sleep(1.5)
+        return True, "SIMULATED_HASH (IRON DOME)"
+    try:
+        img = face_recognition.load_image_file(image_upload)
+        face_locations = face_recognition.face_locations(img)
+        # Strict Liveness
+        if len(face_locations) < 1: 
+            return False, "IRON DOME: No face detected."
+        return True, face_recognition.face_encodings(img, face_locations)[0]
+    except Exception as e: return False, str(e)
 
 # --- 4. BACKEND ---
 def get_db_connection():
@@ -207,7 +238,7 @@ def create_receipt_html(user_name, amount, tx_id):
                 <hr style="border: 1px dashed #333;">
                 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v90.0</div>
+                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v92.0</div>
             </div>
         </body>
     </html>
@@ -221,9 +252,7 @@ defaults = {
     'payout_success': False, 'data_loaded': False, 
     'last_tx_id': None, 'last_payout': 0.0, 
     'show_camera_in': False, 'show_camera_out': False,
-    'current_challenge': None, # For Simon Says
-    'payout_processing': False, # MUTEX LOCK
-    'gps_grace_count': 0
+    'current_challenge': None, 'payout_processing': False, 'gps_grace_count': 0
 }
 for k, v in defaults.items():
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
@@ -239,7 +268,6 @@ if 'logged_in_user' not in st.session_state:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
                 if USERS[pin]['role'] != "Exec":
-                    # Check License on Login
                     valid, msg = verify_practitioner_status(pin)
                     if valid:
                         force_cloud_sync(pin)
@@ -255,31 +283,24 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 7. ATOMIC PAYOUT CALLBACK (THE FIX) ---
+# --- 7. ATOMIC PAYOUT ---
 def atomic_payout():
-    # 1. IMMEDIATE CHECK
-    if st.session_state.user_state['earnings'] <= 0.01:
-        return 
-
-    # 2. LICENSE CHECK (Blocking)
+    if st.session_state.user_state['earnings'] <= 0.01: return 
     is_valid, msg = verify_practitioner_status(pin)
     if not is_valid:
         st.session_state.user_state['payout_processing'] = False
         st.toast(f"PAYOUT FAILED: {msg}")
         return
-
-    # 3. EXECUTE
+    
     current_bal = st.session_state.user_state['earnings']
     net = current_bal * (1 - sum(TAX_RATES.values()))
     
-    # 4. WIPE STATE INSTANTLY
     st.session_state.user_state['earnings'] = 0.0
     st.session_state.user_state['payout_success'] = True
     st.session_state.user_state['last_tx_id'] = f"PENDING-{int(time.time())}"
     st.session_state.user_state['last_payout'] = net
     st.session_state.user_state['payout_processing'] = False 
     
-    # 5. LOG
     tx_id = log_transaction(pin, net)
     st.session_state.user_state['last_tx_id'] = tx_id
     log_history(pin, "PAYOUT", net, "Settled")
@@ -313,18 +334,30 @@ else:
         loc = get_geolocation(component_key=f"gps_{count}")
         ip = get_current_ip()
         
+        # --- CONDITIONAL SECURITY LOGIC ---
         gps_valid = False
-        if loc:
+        if str(pin) == "1001":
+            gps_valid = True # VIP Bypass
+        elif loc:
             lat = loc['coords']['latitude']
             lon = loc['coords']['longitude']
-            gps_valid = verify_geofence(lat, lon) or dev_override
+            gps_valid = verify_geofence(lat, lon, pin) or dev_override
 
-        # TRIPLE HANDSHAKE DISPLAY
+        # TRIPLE HANDSHAKE VISUALS
         c1, c2, c3 = st.columns(3)
         c1.markdown(f"📡 **GPS:** {'✅' if gps_valid else '🚫'}")
-        c2.markdown(f"🌐 **IP:** {'✅' if verify_ip_address(ip) else '🚫'}")
+        c2.markdown(f"🌐 **IP:** {'✅' if verify_ip_address(ip, pin) else '🚫'}")
         c3.markdown(f"🆔 **BIO:** {'WAITING...' if not st.session_state.user_state['active'] else '✅'}")
         
+        # STATUS PILL
+        if str(pin) == "1001":
+            st.markdown('<div class="status-pill vip-mode">🌟 VIP EXECUTIVE ACCESS</div>', unsafe_allow_html=True)
+        else:
+            msg = "✅ SECURE ZONE" if gps_valid else "🚫 OUTSIDE PERIMETER"
+            cls = "safe-mode" if gps_valid else "danger-mode"
+            st.markdown(f'<div class="status-pill {cls}">{msg}</div>', unsafe_allow_html=True)
+
+        # --- AUTO LOGOUT LOGIC ---
         if st.session_state.user_state['active'] and not gps_valid:
             st.session_state.user_state['gps_grace_count'] += 1
             if st.session_state.user_state['gps_grace_count'] > 3:
@@ -358,55 +391,76 @@ else:
         
         st.markdown("###")
         
-        # --- LIVENESS CAMERAS (SIMON SAYS) ---
+        # --- CAMERA LOGIC (VIP vs IRON DOME) ---
         if active:
-            if st.session_state.user_state['show_camera_out']:
-                # Generate challenge if none exists
-                if not st.session_state.user_state['current_challenge']:
-                    st.session_state.user_state['current_challenge'] = random.choice(LIVENESS_CHALLENGES)
-                
-                st.warning(f"📸 CHALLENGE: **{st.session_state.user_state['current_challenge']}**")
-                img = st.camera_input("PERFORM ACTION TO CLOCK OUT")
-                
-                if img:
+            # CLOCK OUT
+            if str(pin) == "1001":
+                # VIP: ONE BUTTON CLICK
+                if st.button("🔴 END SHIFT (VIP)"):
                     st.session_state.user_state['active'] = False
-                    st.session_state.user_state['show_camera_out'] = False 
-                    st.session_state.user_state['current_challenge'] = None
                     update_cloud_status(pin, "Inactive", 0, earnings)
-                    log_history(pin, "CLOCK OUT", earnings, "Bio-Verified")
-                    st.rerun()
-                if st.button("CANCEL"):
-                    st.session_state.user_state['show_camera_out'] = False
+                    log_history(pin, "CLOCK OUT", earnings, "VIP Bypass")
                     st.rerun()
             else:
-                if st.button("🔴 END SHIFT"):
-                    st.session_state.user_state['show_camera_out'] = True
-                    st.rerun()
-        else:
-            if gps_valid:
-                if st.session_state.user_state['show_camera_in']:
-                    # Generate challenge
+                # IRON DOME: SIMON SAYS
+                if st.session_state.user_state['show_camera_out']:
                     if not st.session_state.user_state['current_challenge']:
                         st.session_state.user_state['current_challenge'] = random.choice(LIVENESS_CHALLENGES)
-                    
                     st.warning(f"📸 CHALLENGE: **{st.session_state.user_state['current_challenge']}**")
-                    img = st.camera_input("PERFORM ACTION TO CLOCK IN")
-                    
+                    img = st.camera_input("PERFORM ACTION TO CLOCK OUT")
                     if img:
-                        st.session_state.user_state['active'] = True
-                        st.session_state.user_state['start_time'] = time.time()
-                        st.session_state.user_state['show_camera_in'] = False
-                        st.session_state.user_state['current_challenge'] = None
-                        update_cloud_status(pin, "Active", time.time(), earnings)
-                        log_history(pin, "CLOCK IN", earnings, f"Bio-Verified IP: {ip}")
-                        st.rerun()
+                        success, data = process_biometric_hash(img, pin)
+                        if success:
+                            st.session_state.user_state['active'] = False
+                            st.session_state.user_state['show_camera_out'] = False 
+                            st.session_state.user_state['current_challenge'] = None
+                            update_cloud_status(pin, "Inactive", 0, earnings)
+                            log_history(pin, "CLOCK OUT", earnings, "Iron Dome Verified")
+                            st.rerun()
+                        else: st.error(f"BIOMETRIC ERROR: {data}")
                     if st.button("CANCEL"):
-                        st.session_state.user_state['show_camera_in'] = False
+                        st.session_state.user_state['show_camera_out'] = False
                         st.rerun()
                 else:
-                    if st.button("🟢 START SHIFT"):
-                        st.session_state.user_state['show_camera_in'] = True
+                    if st.button("🔴 END SHIFT"):
+                        st.session_state.user_state['show_camera_out'] = True
                         st.rerun()
+        else:
+            # CLOCK IN
+            if gps_valid:
+                if str(pin) == "1001":
+                    # VIP: ONE BUTTON CLICK
+                    if st.button("🟢 START SHIFT (VIP)"):
+                        st.session_state.user_state['active'] = True
+                        st.session_state.user_state['start_time'] = time.time()
+                        update_cloud_status(pin, "Active", time.time(), earnings)
+                        log_history(pin, "CLOCK IN", earnings, f"VIP IP: {ip}")
+                        st.rerun()
+                else:
+                    # IRON DOME: SIMON SAYS
+                    if st.session_state.user_state['show_camera_in']:
+                        if not st.session_state.user_state['current_challenge']:
+                            st.session_state.user_state['current_challenge'] = random.choice(LIVENESS_CHALLENGES)
+                        st.warning(f"📸 CHALLENGE: **{st.session_state.user_state['current_challenge']}**")
+                        img = st.camera_input("PERFORM ACTION TO CLOCK IN")
+                        if img:
+                            success, data = process_biometric_hash(img, pin)
+                            if success:
+                                st.session_state.user_state['active'] = True
+                                st.session_state.user_state['start_time'] = time.time()
+                                st.session_state.user_state['show_camera_in'] = False
+                                st.session_state.user_state['current_challenge'] = None
+                                update_cloud_status(pin, "Active", time.time(), earnings)
+                                log_history(pin, "CLOCK IN", earnings, f"Verified IP: {ip}")
+                                st.rerun()
+                            else: st.error(f"BIOMETRIC ERROR: {data}")
+                        if st.button("CANCEL"):
+                            st.session_state.user_state['show_camera_in'] = False
+                            st.rerun()
+                    else:
+                        if st.button("🟢 START SHIFT"):
+                            st.session_state.user_state['show_camera_in'] = True
+                            st.rerun()
             else:
                 st.info(f"📍 PROCEED TO {user.get('location').upper()}")
         
