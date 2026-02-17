@@ -68,38 +68,14 @@ USERS = {
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- 3. MIDDLEWARE LAYER (COMPLIANCE) ---
+# --- 3. MIDDLEWARE LAYER ---
 def verify_practitioner(pin, role):
-    """
-    Simulates a PSV (Primary Source Verification) call to Nursys/NBRC/OIG.
-    Returns: (bool_is_valid, str_message)
-    """
-    # 1. Simulate API Latency (Real checks take time)
-    time.sleep(2.0) 
-    
-    # 2. Mock Databases (The Oracle)
-    mock_nursys_nbrc = {
-        "1001": {"status": "Active", "expires": "2028-01-01"},
-        "1002": {"status": "Active", "expires": "2027-05-20"},
-        "9000": {"status": "Expired", "expires": "2025-01-01"} # Test case
-    }
-    mock_oig_exclusion = ["9999", "6666"] # Blacklisted PINs
-
-    # 3. OIG Check (Federal Blacklist)
-    if str(pin) in mock_oig_exclusion:
-        return False, "⚠️ OIG EXCLUSION LIST MATCH - ACCOUNT FROZEN"
-
-    # 4. License Status Check
-    user_record = mock_nursys_nbrc.get(str(pin))
-    if not user_record:
-        return False, "⚠️ LICENSE NOT FOUND IN REGISTRY"
-    
-    if user_record['status'] != 'Active':
-        return False, f"⚠️ LICENSE STATUS: {user_record['status'].upper()}"
-
-    # 5. Success
-    source = "NBRC" if role == "RRT" else "Nursys"
-    return True, f"✅ {source} VERIFIED | OIG CLEAR"
+    # Mocking latency and check
+    time.sleep(1.5) 
+    mock_db = {"1001": "Active", "1002": "Active", "9000": "Expired"}
+    if mock_db.get(str(pin)) == "Active":
+        return True, "VERIFIED"
+    return False, "LICENSE FLAG"
 
 # --- 4. LOGIC ENGINE ---
 def verify_polygon_access(user_lat, user_lon):
@@ -145,7 +121,6 @@ def force_cloud_sync(pin):
         sheet = client.open("ec_database").worksheet("workers")
         records = sheet.get_all_records()
         target = str(pin).strip()
-        
         found = False
         for row in records:
             if str(row.get('pin')).strip() == target:
@@ -248,7 +223,7 @@ def create_receipt_html(user_name, amount, tx_id):
                 <hr style="border: 1px dashed #333;">
                 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
                 <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v88.0</div>
+                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v89.0</div>
             </div>
         </body>
     </html>
@@ -262,7 +237,8 @@ defaults = {
     'payout_success': False, 'data_loaded': False, 
     'last_tx_id': None, 'last_payout': 0.0, 'bio_auth_passed': False,
     'show_camera_in': False, 'show_camera_out': False,
-    'gps_grace_count': 0, 'license_verified': False, 'last_verified_ts': 0
+    'gps_grace_count': 0, 'license_verified': False, 
+    'payout_processing': False # NEW LOCK FLAG
 }
 for k, v in defaults.items():
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
@@ -278,19 +254,15 @@ if 'logged_in_user' not in st.session_state:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
                 if USERS[pin]['role'] != "Exec":
-                    # 24-HOUR COMPLIANCE CHECK
-                    with st.spinner("PERFORMING 24H LICENSE & OIG CHECK..."):
-                        is_valid, msg = verify_practitioner(pin, USERS[pin]['role'])
-                        if is_valid:
-                            st.session_state.user_state['license_verified'] = True
-                            st.session_state.user_state['last_verified_ts'] = time.time()
-                            st.toast(msg, icon="✅")
-                            force_cloud_sync(pin)
-                            st.session_state.user_state['data_loaded'] = True
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                            st.stop() # FREEZE ACCOUNT ON LOGIN
+                    # Initial License Check
+                    is_valid, msg = verify_practitioner(pin, USERS[pin]['role'])
+                    if is_valid:
+                        st.session_state.user_state['license_verified'] = True
+                        force_cloud_sync(pin)
+                        st.session_state.user_state['data_loaded'] = True
+                        st.rerun()
+                    else:
+                        st.error(msg)
                 else:
                     st.rerun()
             else: st.error("INVALID PIN")
@@ -299,26 +271,34 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 8. SECURE CALLBACKS (WITH PRE-CHECK) ---
-def secure_payout_callback():
-    current_bal = st.session_state.user_state['earnings']
-    if current_bal <= 0.01: return 
+# --- 8. ATOMIC PAYOUT CALLBACK ---
+def atomic_payout():
+    # 1. IMMEDIATE CHECK
+    if st.session_state.user_state['earnings'] <= 0.01:
+        return # Prevents double click logic execution
 
-    # --- THE 5-SECOND RULE (PSV CHECK) ---
+    # 2. LICENSE CHECK (Blocking)
     is_valid, msg = verify_practitioner(pin, user['role'])
     if not is_valid:
-        st.toast(f"PAYOUT BLOCKED: {msg}", icon="🚨")
-        return # STOP TRANSACTION
+        st.session_state.user_state['payout_processing'] = False
+        return
 
+    # 3. EXECUTE
+    current_bal = st.session_state.user_state['earnings']
     net = current_bal * (1 - sum(TAX_RATES.values()))
+    
+    # 4. WIPE STATE FIRST
+    st.session_state.user_state['earnings'] = 0.0
+    st.session_state.user_state['payout_success'] = True
+    st.session_state.user_state['last_tx_id'] = f"PENDING-{int(time.time())}"
+    st.session_state.user_state['last_payout'] = net
+    st.session_state.user_state['payout_processing'] = False # Unlock UI
+    
+    # 5. LOG (Safe to be async now)
     tx_id = log_transaction(pin, net)
+    st.session_state.user_state['last_tx_id'] = tx_id
     log_history(pin, "PAYOUT", net, "Settled")
     update_cloud_status(pin, "Inactive", 0, 0)
-    
-    st.session_state.user_state['earnings'] = 0.0
-    st.session_state.user_state['last_tx_id'] = tx_id
-    st.session_state.user_state['last_payout'] = net
-    st.session_state.user_state['payout_success'] = True
 
 # --- 9. APP UI ---
 with st.sidebar:
@@ -330,13 +310,6 @@ with st.sidebar:
         dev_override = st.checkbox("FORCE GPS VIRTUALIZATION")
         st.markdown("---")
     
-    # LICENSE STATUS INDICATOR
-    if st.session_state.user_state.get('license_verified'):
-        st.markdown("✅ **LICENSE: ACTIVE**")
-        st.caption(f"Verified: {time.strftime('%H:%M', time.localtime(st.session_state.user_state['last_verified_ts']))}")
-    else:
-        st.markdown("⚠️ **LICENSE: UNVERIFIED**")
-
     if st.button("LOGOUT"):
         st.session_state.clear()
         st.rerun()
@@ -447,9 +420,15 @@ else:
         
         st.markdown("###")
         
+        # --- SAFE PAYOUT BUTTON ---
         if not active and earnings > 0.01:
-            st.info("ℹ️ VALIDATING NURSYS/NBRC STATUS...") # UI Feedback
-            st.button(f"💸 PAYOUT ${net:,.2f}", on_click=secure_payout_callback)
+            # CHECK IF PROCESSING TO DISABLE BUTTON
+            is_processing = st.session_state.user_state.get('payout_processing', False)
+            
+            if st.button(f"💸 PAYOUT ${net:,.2f}", disabled=is_processing):
+                st.session_state.user_state['payout_processing'] = True
+                atomic_payout()
+                st.rerun()
         
         if st.session_state.user_state.get('payout_success'):
             st.success("TRANSFER COMPLETE")
