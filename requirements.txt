@@ -3,7 +3,9 @@ pandas
 numpy
 requests
 pytz
-gspread
-oauth2client
 streamlit-js-eval
 streamlit-autorefresh
+sqlalchemy
+psycopg2-binary
+face_recognition
+shapely
