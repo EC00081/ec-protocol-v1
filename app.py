@@ -61,13 +61,14 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. DATABASE ENGINE (LOUD DEBUG MODE) ---
+# --- 5. DATABASE ENGINE (FORCE COMMIT) ---
 @st.cache_resource
 def get_db_engine():
     try:
         url = st.secrets["SUPABASE_URL"]
         if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
-        return create_engine(url)
+        # FORCE AUTOCOMMIT to ensure data is saved immediately
+        return create_engine(url, isolation_level="AUTOCOMMIT")
     except Exception as e:
         st.error(f"🚨 DB CONNECTION FAILED: {e}")
         return None
@@ -106,7 +107,6 @@ def force_cloud_sync(pin):
     except: return False
 
 def update_status(pin, status, start, earn):
-    # UPSERT Logic
     q = """
     INSERT INTO workers (pin, status, start_time, earnings, last_active)
     VALUES (:p, :s, :t, :e, NOW())
@@ -221,6 +221,8 @@ if nav == "DASHBOARD":
                 st.session_state.user_state['active'] = False
                 update_status(pin, "Inactive", 0, 0)
                 log_action(pin, "CLOCK OUT", gross, "VIP")
+                st.success("✅ Clock Out Saved to Database")
+                time.sleep(1)
                 st.rerun()
         else:
             if not st.session_state.user_state['challenge']: 
@@ -234,6 +236,8 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['challenge'] = None
                     update_status(pin, "Inactive", 0, 0)
                     log_action(pin, "CLOCK OUT", gross, "Verified")
+                    st.success("✅ Clock Out Saved to Database")
+                    time.sleep(1)
                     st.rerun()
                 else: st.error(msg)
     else:
@@ -243,6 +247,8 @@ if nav == "DASHBOARD":
                 st.session_state.user_state['start_time'] = time.time()
                 update_status(pin, "Active", time.time(), 0)
                 log_action(pin, "CLOCK IN", 0, "VIP")
+                st.success("✅ Clock In Saved to Database")
+                time.sleep(1)
                 st.rerun()
         else:
             if not st.session_state.user_state['challenge']: 
@@ -257,6 +263,8 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['challenge'] = None
                     update_status(pin, "Active", time.time(), 0)
                     log_action(pin, "CLOCK IN", 0, "Verified")
+                    st.success("✅ Clock In Saved to Database")
+                    time.sleep(1)
                     st.rerun()
                 else: st.error(msg)
 
@@ -269,7 +277,7 @@ if nav == "DASHBOARD":
             log_action(pin, "PAYOUT", net, "Settled")
             update_status(pin, "Inactive", 0, 0)
             st.session_state.user_state['earnings'] = 0.0
-            st.success(f"SENT: {tx}")
+            st.success(f"✅ Payout Sent: {tx}")
             time.sleep(2)
             st.session_state.user_state['payout_lock'] = False
             st.rerun()
@@ -290,7 +298,8 @@ elif nav == "MARKETPLACE":
                         st.write(f"Time: {s[4]} - {s[5]}")
                         if st.button("CLAIM SHIFT", key=s[0]):
                             claim_shift_db(s[0], pin)
-                            st.success("CLAIMED!")
+                            st.success("✅ Shift Claimed & Saved!")
+                            time.sleep(1)
                             st.rerun()
             else:
                 st.info("No Open Shifts")
@@ -305,9 +314,11 @@ elif nav == "MARKETPLACE":
             e_time = c2.time_input("End")
             if st.form_submit_button("POST"):
                 post_shift_db(pin, user['role'], d, s_time, e_time, user['rate'])
-                st.success("Posted!")
+                st.success("✅ Shift Posted to Database!")
 
 elif nav == "LOGS":
     st.title("Audit Logs")
     try:
-        res = run_query("SELECT * FROM history WHERE pin
+        res = run_query("SELECT * FROM history WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        if res: st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
+    except: st.write("No History")
