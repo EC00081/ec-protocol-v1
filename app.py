@@ -9,11 +9,14 @@ import uuid
 import random
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from streamlit_autorefresh import st_autorefresh
+import sqlalchemy
+from sqlalchemy import create_engine, text
 
-# --- 0. LIGHTWEIGHT LIBRARY LOADER ---
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="centered", initial_sidebar_state="expanded")
+
+# --- 2. LIBRARY LOADING (Safe Mode) ---
 try:
     import face_recognition
     from shapely.geometry import Point, Polygon
@@ -26,22 +29,11 @@ except ImportError:
         def __init__(self, points): self.points = points
         def contains(self, point): return True 
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(
-    page_title="EC Enterprise", 
-    page_icon="🛡️", 
-    layout="centered", 
-    initial_sidebar_state="expanded"
-)
-
+# --- 3. STYLING ---
 st.markdown("""
-    <head>
-        <meta name="apple-mobile-web-app-capable" content="yes">
-        <meta name="theme-color" content="#0E1117">
-    </head>
+    <head><meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#0E1117"></head>
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     .stApp { background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117); color: #FFFFFF; font-family: 'Inter', sans-serif; }
     div[data-testid="stMap"] { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2); }
     .status-pill { display: flex; align-items: center; justify-content: center; padding: 12px; border-radius: 50px; font-weight: 600; margin-bottom: 20px; backdrop-filter: blur(10px); }
@@ -54,212 +46,101 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. CONSTANTS ---
+# --- 4. CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
-GEOFENCE_RADIUS = 45
-LIVENESS_CHALLENGES = [
-    "TOUCH YOUR LEFT EAR", "LOOK UP AT THE CEILING", 
-    "GIVE A THUMBS UP", "TOUCH YOUR NOSE", "COVER YOUR MOUTH"
-]
-
-def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
+GEOFENCE_RADIUS = 45 
+LIVENESS_CHALLENGES = ["TOUCH YOUR LEFT EAR", "LOOK UP AT THE CEILING", "GIVE A THUMBS UP", "TOUCH YOUR NOSE"]
 
 USERS = {
-    "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton", "license": "RRT-998822"},
-    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00, "lat": 42.0875, "lon": -70.9915, "location": "Brockton", "license": "RRT-776655"},
+    "1001": {"name": "Liam O'Neil", "role": "RRT", "rate": 85.00},
+    "1002": {"name": "Charles Morgan", "role": "RRT", "rate": 85.00},
     "9999": {"name": "CFO VIEW", "role": "Exec", "rate": 0.00}
 }
 
-# --- 3. SECURITY ENGINE (VIP vs IRON DOME) ---
-def verify_geofence(user_lat, user_lon, pin):
-    # VIP BYPASS (1001)
-    if str(pin) == "1001": return True
-    
-    # IRON DOME (Everyone Else)
-    target_lat = 42.0875
-    target_lon = -70.9915
-    R = 6371000
-    lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
-    lat2, lon2 = math.radians(target_lat), math.radians(target_lon)
-    a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2) * math.sin((lon2-lon1)/2)**2
-    dist = R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
-    return dist < GEOFENCE_RADIUS
+def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-def verify_ip_address(user_ip, pin):
-    # VIP BYPASS (1001)
-    if str(pin) == "1001": return True
-    
-    # IRON DOME Check (Simulated IP Range)
-    return True # In Pilot, check "192.168.1.x"
-
-def verify_practitioner_status(pin):
-    # VIP: Instant Pass
-    if str(pin) == "1001": return True, "VIP CLEARANCE"
-    
-    # IRON DOME: Simulation Latency
-    time.sleep(1.5) 
-    if str(pin) in ["1002"]: return True, "LICENSE ACTIVE"
-    return False, "LICENSE EXPIRED/SUSPENDED"
-
-def process_biometric_hash(image_upload, pin):
-    # VIP BYPASS (1001)
-    if str(pin) == "1001":
-        return True, "VIP BYPASS"
-
-    # IRON DOME (Strict)
-    if not BIO_ENGINE_AVAILABLE:
-        time.sleep(1.5)
-        return True, "SIMULATED_HASH (IRON DOME)"
+# --- 5. DATABASE ENGINE (SUPABASE) ---
+@st.cache_resource
+def get_db_engine():
     try:
-        img = face_recognition.load_image_file(image_upload)
-        face_locations = face_recognition.face_locations(img)
-        # Strict Liveness
-        if len(face_locations) < 1: 
-            return False, "IRON DOME: No face detected."
-        return True, face_recognition.face_encodings(img, face_locations)[0]
-    except Exception as e: return False, str(e)
-
-# --- 4. BACKEND ---
-def get_db_connection():
-    try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
-        return gspread.authorize(creds)
+        # Looks for the secret variable on the server
+        url = st.secrets["SUPABASE_URL"]
+        if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
+        return create_engine(url)
     except: return None
 
-def get_current_ip():
-    try: return requests.get('https://api.ipify.org', timeout=1).text
-    except: return "Unknown"
+def run_query(query, params=None):
+    engine = get_db_engine()
+    if not engine: return None
+    with engine.connect() as conn:
+        return conn.execute(text(query), params or {})
 
+def run_transaction(query, params=None):
+    engine = get_db_engine()
+    if not engine: return
+    with engine.begin() as conn:
+        conn.execute(text(query), params or {})
+
+# --- 6. CORE LOGIC ---
 def force_cloud_sync(pin):
-    client = get_db_connection()
-    if not client: return False
     try:
-        sheet = client.open("ec_database").worksheet("workers")
-        records = sheet.get_all_records()
-        target = str(pin).strip()
-        found = False
-        for row in records:
-            if str(row.get('pin')).strip() == target:
-                found = True
-                status = str(row.get('status')).strip().lower()
-                if status == 'active':
-                    st.session_state.user_state['active'] = True
-                    try: st.session_state.user_state['start_time'] = float(row.get('start_time', time.time()))
-                    except: pass
-                else:
-                    st.session_state.user_state['active'] = False
-                break
-        return found
+        res = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
+        row = res.fetchone()
+        if row and row[0].lower() == 'active':
+            st.session_state.user_state['active'] = True
+            st.session_state.user_state['start_time'] = float(row[1])
+            return True
+        st.session_state.user_state['active'] = False
+        return False
     except: return False
 
-def update_cloud_status(pin, status, start, earn):
-    client = get_db_connection()
-    if client:
-        try:
-            sheet = client.open("ec_database").worksheet("workers")
-            try:
-                cell = sheet.find(str(pin))
-                sheet.update_cell(cell.row, 2, status)
-                sheet.update_cell(cell.row, 3, str(start))
-                sheet.update_cell(cell.row, 4, str(earn))
-                sheet.update_cell(cell.row, 5, get_local_now())
-            except:
-                sheet.append_row([str(pin), status, str(start), str(earn), get_local_now()])
-        except: pass
+def update_status(pin, status, start, earn):
+    q = "UPDATE workers SET status=:s, start_time=:t, earnings=:e, last_active=NOW() WHERE pin=:p"
+    run_transaction(q, {"s": status, "t": start, "e": earn, "p": pin})
 
-def log_transaction(pin, amount):
+def log_tx(pin, amount):
     tx_id = f"TX-{int(time.time())}"
-    client = get_db_connection()
-    if client:
-        try:
-            sheet = client.open("ec_database").worksheet("transactions")
-            sheet.append_row([tx_id, str(pin), f"${amount:.2f}", get_local_now(), "INSTANT"])
-        except: pass
+    q = "INSERT INTO transactions (tx_id, pin, amount, timestamp, status) VALUES (:id, :p, :a, NOW(), 'INSTANT')"
+    run_transaction(q, {"id": tx_id, "p": pin, "a": amount})
     return tx_id
 
-def log_history(pin, action, amount, note):
-    client = get_db_connection()
-    if client:
-        try:
-            sheet = client.open("ec_database").worksheet("history")
-            sheet.append_row([str(pin), action, get_local_now(), f"${amount:.2f}", note])
-        except: pass
+def log_action(pin, action, amount, note):
+    q = "INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)"
+    run_transaction(q, {"p": pin, "a": action, "amt": amount, "n": note})
 
-def post_shift_to_market(pin, role, d, s, e, rate):
-    client = get_db_connection()
-    if client:
-        try:
-            shift_id = str(uuid.uuid4())[:8]
-            s_str = s.strftime("%H:%M EST")
-            e_str = e.strftime("%H:%M EST")
-            sheet = client.open("ec_database").worksheet("marketplace")
-            sheet.append_row([shift_id, str(pin), role, str(d), s_str, e_str, str(rate), "OPEN"])
-            return True
-        except: return False
-    return False
+# --- 7. SECURITY GATES ---
+def verify_security(pin, lat, lon, ip, img):
+    # VIP BYPASS (1001)
+    if str(pin) == "1001": return True, "VIP ACCESS GRANTED"
+    
+    # IRON DOME CHECKS (Everyone Else)
+    # 1. Geofence
+    target_lat, target_lon = 42.0875, -70.9915
+    R = 6371000
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+    lat2, lon2 = math.radians(target_lat), math.radians(target_lon)
+    dist = R * (2 * math.atan2(math.sqrt(math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2) * math.sin((lon2-lon1)/2)**2), math.sqrt(1-math.sin((lat2-lat1)/2)**2)))
+    if dist > GEOFENCE_RADIUS: return False, f"GEOFENCE FAIL ({int(dist)}m)"
+    
+    # 2. Bio-Liveness
+    if not BIO_ENGINE_AVAILABLE: return True, "BIO SIMULATED (OK)"
+    try:
+        f_img = face_recognition.load_image_file(img)
+        if len(face_recognition.face_locations(f_img)) < 1: return False, "NO FACE DETECTED"
+    except: return False, "BIO ERROR"
+    
+    return True, "IRON DOME VERIFIED"
 
-def claim_shift(shift_id, claimer_pin):
-    client = get_db_connection()
-    if client:
-        try:
-            sheet = client.open("ec_database").worksheet("marketplace")
-            cell = sheet.find(shift_id)
-            sheet.update_cell(cell.row, 8, f"CLAIMED BY {claimer_pin}")
-            return True
-        except: return False
-    return False
-
-def log_schedule(pin, d, s, e):
-    client = get_db_connection()
-    if client:
-        try:
-            dt_s = datetime.combine(d, s).strftime("%Y-%m-%d %H:%M:%S EST")
-            dt_e = datetime.combine(d, e).strftime("%Y-%m-%d %H:%M:%S EST")
-            sheet = client.open("ec_database").worksheet("schedule")
-            sheet.append_row([str(pin), str(d), dt_s, dt_e, "Scheduled"])
-            return True
-        except: return False
-    return False
-
-def create_receipt_html(user_name, amount, tx_id):
-    date_str = get_local_now()
-    html = f"""
-    <html>
-        <body style="font-family: monospace; padding: 40px; color: #333;">
-            <div style="border: 2px solid #333; padding: 30px; max-width: 400px; margin: auto;">
-                <h1 style="text-align: center;">EC ENTERPRISE</h1>
-                <div style="text-align:center;">OFFICIAL PAY STUB</div>
-                <hr style="border: 1px dashed #333;">
-                <div style="display:flex; justify-content:space-between;"><span>PAYEE:</span><span>{user_name}</span></div>
-                <div style="display:flex; justify-content:space-between;"><span>DATE:</span><span>{date_str}</span></div>
-                <div style="display:flex; justify-content:space-between;"><span>TX ID:</span><span>{tx_id}</span></div>
-                <hr style="border: 1px dashed #333;">
-                <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>NET PAY:</span><span>${amount:.2f}</span></div>
-                <hr style="border: 1px dashed #333;">
-                <div style="text-align: center; font-size: 0.8em; margin-top: 20px;">FUNDS SETTLED VIA INSTANT TRANSFER<br>SECURE PROTOCOL v92.0</div>
-            </div>
-        </body>
-    </html>
-    """
-    return html
-
-# --- 5. INITIALIZATION ---
+# --- 8. UI & STATE ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {}
-defaults = {
-    'active': False, 'start_time': 0.0, 'earnings': 0.0, 
-    'payout_success': False, 'data_loaded': False, 
-    'last_tx_id': None, 'last_payout': 0.0, 
-    'show_camera_in': False, 'show_camera_out': False,
-    'current_challenge': None, 'payout_processing': False, 'gps_grace_count': 0
-}
-for k, v in defaults.items():
+defaults = {'active': False, 'start_time': 0.0, 'earnings': 0.0, 'payout_success': False, 'payout_lock': False, 'challenge': None}
+for k, v in defaults.items(): 
     if k not in st.session_state.user_state: st.session_state.user_state[k] = v
 
-# --- 6. AUTHENTICATION ---
+# --- 9. AUTH SCREEN ---
 if 'logged_in_user' not in st.session_state:
-    st.markdown("<h1 style='text-align: center; margin-top: 50px;'>🛡️ EC PROTOCOL</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>🛡️ EC PROTOCOL</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
         pin = st.text_input("ACCESS CODE", type="password")
@@ -267,287 +148,118 @@ if 'logged_in_user' not in st.session_state:
             if pin in USERS:
                 st.session_state.logged_in_user = USERS[pin]
                 st.session_state.pin = pin
-                if USERS[pin]['role'] != "Exec":
-                    valid, msg = verify_practitioner_status(pin)
-                    if valid:
-                        force_cloud_sync(pin)
-                        st.session_state.user_state['data_loaded'] = True
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                else:
-                    st.rerun()
+                force_cloud_sync(pin)
+                st.rerun()
             else: st.error("INVALID PIN")
     st.stop()
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 7. ATOMIC PAYOUT ---
-def atomic_payout():
-    if st.session_state.user_state['earnings'] <= 0.01: return 
-    is_valid, msg = verify_practitioner_status(pin)
-    if not is_valid:
-        st.session_state.user_state['payout_processing'] = False
-        st.toast(f"PAYOUT FAILED: {msg}")
-        return
-    
-    current_bal = st.session_state.user_state['earnings']
-    net = current_bal * (1 - sum(TAX_RATES.values()))
-    
-    st.session_state.user_state['earnings'] = 0.0
-    st.session_state.user_state['payout_success'] = True
-    st.session_state.user_state['last_tx_id'] = f"PENDING-{int(time.time())}"
-    st.session_state.user_state['last_payout'] = net
-    st.session_state.user_state['payout_processing'] = False 
-    
-    tx_id = log_transaction(pin, net)
-    st.session_state.user_state['last_tx_id'] = tx_id
-    log_history(pin, "PAYOUT", net, "Settled")
-    update_cloud_status(pin, "Inactive", 0, 0)
-
-# --- 8. APP UI ---
+# --- 10. MAIN APP ---
 with st.sidebar:
     st.markdown("### 🧭 NAVIGATION")
-    nav_selection = st.radio("GO TO:", ["LIVE DASHBOARD", "MARKETPLACE", "SCHEDULER", "LOGS"])
-    st.markdown("---")
-    if str(pin) == "1001":
-        st.caption("ADMIN OVERRIDE")
-        dev_override = st.checkbox("FORCE GPS VIRTUALIZATION")
-        st.markdown("---")
-    if st.button("LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
+    nav = st.radio("GO TO:", ["DASHBOARD", "MARKETPLACE", "LOGS"])
+    if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
-if user['role'] == "Exec":
-    st.title("COMMAND CENTER")
-    st_autorefresh(interval=30000, key="cfo")
-    client = get_db_connection()
-    if client:
-        data = client.open("ec_database").worksheet("workers").get_all_records()
-        st.dataframe(pd.DataFrame(data))
-else:
-    st.markdown(f"""<div class="hero-header"><h2 style='margin:0;'>EC ENTERPRISE</h2><div style='background:rgba(255, 255, 255, 0.1); color:#FFFFFF; padding:5px 15px; border-radius:20px; display:inline-block; margin-top:10px; font-weight: bold;'>OPERATOR: {user['name'].upper()} ({user['role']})</div></div>""", unsafe_allow_html=True)
-
-    if nav_selection == "LIVE DASHBOARD":
-        count = st_autorefresh(interval=10000, key="pulse")
-        loc = get_geolocation(component_key=f"gps_{count}")
-        ip = get_current_ip()
-        
-        # --- CONDITIONAL SECURITY LOGIC ---
-        gps_valid = False
-        if str(pin) == "1001":
-            gps_valid = True # VIP Bypass
-        elif loc:
-            lat = loc['coords']['latitude']
-            lon = loc['coords']['longitude']
-            gps_valid = verify_geofence(lat, lon, pin) or dev_override
-
-        # TRIPLE HANDSHAKE VISUALS
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(f"📡 **GPS:** {'✅' if gps_valid else '🚫'}")
-        c2.markdown(f"🌐 **IP:** {'✅' if verify_ip_address(ip, pin) else '🚫'}")
-        c3.markdown(f"🆔 **BIO:** {'WAITING...' if not st.session_state.user_state['active'] else '✅'}")
-        
-        # STATUS PILL
-        if str(pin) == "1001":
-            st.markdown('<div class="status-pill vip-mode">🌟 VIP EXECUTIVE ACCESS</div>', unsafe_allow_html=True)
-        else:
-            msg = "✅ SECURE ZONE" if gps_valid else "🚫 OUTSIDE PERIMETER"
-            cls = "safe-mode" if gps_valid else "danger-mode"
-            st.markdown(f'<div class="status-pill {cls}">{msg}</div>', unsafe_allow_html=True)
-
-        # --- AUTO LOGOUT LOGIC ---
-        if st.session_state.user_state['active'] and not gps_valid:
-            st.session_state.user_state['gps_grace_count'] += 1
-            if st.session_state.user_state['gps_grace_count'] > 3:
-                st.session_state.user_state['active'] = False
-                update_cloud_status(pin, "Inactive", 0, st.session_state.user_state['earnings'])
-                log_history(pin, "AUTO-LOGOUT", st.session_state.user_state['earnings'], "Geofence Exit")
-                st.error("⚠️ GEOFENCE EXIT - CLOCKED OUT")
-                st.rerun()
-        else:
-            st.session_state.user_state['gps_grace_count'] = 0
-
-        active = st.session_state.user_state['active']
-        earnings = st.session_state.user_state['earnings']
-        
-        if active:
-            start_t = st.session_state.user_state['start_time']
-            if start_t > 0:
-                elapsed_hrs = (time.time() - start_t) / 3600
-                earnings = elapsed_hrs * user['rate']
-                st.session_state.user_state['earnings'] = earnings
-
-        gross = earnings
-        tax_held = earnings * 0.3465
-        net = earnings * (1 - 0.3465)
-        
-        st.markdown("---")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("GROSS", f"${gross:,.2f}")
-        c2.metric("🔒 TAX VAULT", f"${tax_held:,.2f}") 
-        c3.metric("NET AVAIL", f"${net:,.2f}")
-        
-        st.markdown("###")
-        
-        # --- CAMERA LOGIC (VIP vs IRON DOME) ---
-        if active:
-            # CLOCK OUT
-            if str(pin) == "1001":
-                # VIP: ONE BUTTON CLICK
-                if st.button("🔴 END SHIFT (VIP)"):
-                    st.session_state.user_state['active'] = False
-                    update_cloud_status(pin, "Inactive", 0, earnings)
-                    log_history(pin, "CLOCK OUT", earnings, "VIP Bypass")
-                    st.rerun()
-            else:
-                # IRON DOME: SIMON SAYS
-                if st.session_state.user_state['show_camera_out']:
-                    if not st.session_state.user_state['current_challenge']:
-                        st.session_state.user_state['current_challenge'] = random.choice(LIVENESS_CHALLENGES)
-                    st.warning(f"📸 CHALLENGE: **{st.session_state.user_state['current_challenge']}**")
-                    img = st.camera_input("PERFORM ACTION TO CLOCK OUT")
-                    if img:
-                        success, data = process_biometric_hash(img, pin)
-                        if success:
-                            st.session_state.user_state['active'] = False
-                            st.session_state.user_state['show_camera_out'] = False 
-                            st.session_state.user_state['current_challenge'] = None
-                            update_cloud_status(pin, "Inactive", 0, earnings)
-                            log_history(pin, "CLOCK OUT", earnings, "Iron Dome Verified")
-                            st.rerun()
-                        else: st.error(f"BIOMETRIC ERROR: {data}")
-                    if st.button("CANCEL"):
-                        st.session_state.user_state['show_camera_out'] = False
-                        st.rerun()
-                else:
-                    if st.button("🔴 END SHIFT"):
-                        st.session_state.user_state['show_camera_out'] = True
-                        st.rerun()
-        else:
-            # CLOCK IN
-            if gps_valid:
-                if str(pin) == "1001":
-                    # VIP: ONE BUTTON CLICK
-                    if st.button("🟢 START SHIFT (VIP)"):
-                        st.session_state.user_state['active'] = True
-                        st.session_state.user_state['start_time'] = time.time()
-                        update_cloud_status(pin, "Active", time.time(), earnings)
-                        log_history(pin, "CLOCK IN", earnings, f"VIP IP: {ip}")
-                        st.rerun()
-                else:
-                    # IRON DOME: SIMON SAYS
-                    if st.session_state.user_state['show_camera_in']:
-                        if not st.session_state.user_state['current_challenge']:
-                            st.session_state.user_state['current_challenge'] = random.choice(LIVENESS_CHALLENGES)
-                        st.warning(f"📸 CHALLENGE: **{st.session_state.user_state['current_challenge']}**")
-                        img = st.camera_input("PERFORM ACTION TO CLOCK IN")
-                        if img:
-                            success, data = process_biometric_hash(img, pin)
-                            if success:
-                                st.session_state.user_state['active'] = True
-                                st.session_state.user_state['start_time'] = time.time()
-                                st.session_state.user_state['show_camera_in'] = False
-                                st.session_state.user_state['current_challenge'] = None
-                                update_cloud_status(pin, "Active", time.time(), earnings)
-                                log_history(pin, "CLOCK IN", earnings, f"Verified IP: {ip}")
-                                st.rerun()
-                            else: st.error(f"BIOMETRIC ERROR: {data}")
-                        if st.button("CANCEL"):
-                            st.session_state.user_state['show_camera_in'] = False
-                            st.rerun()
-                    else:
-                        if st.button("🟢 START SHIFT"):
-                            st.session_state.user_state['show_camera_in'] = True
-                            st.rerun()
-            else:
-                st.info(f"📍 PROCEED TO {user.get('location').upper()}")
-        
-        st.markdown("###")
-        
-        # --- SAFE PAYOUT ---
-        if not active and earnings > 0.01:
-            is_processing = st.session_state.user_state.get('payout_processing', False)
-            if st.button(f"💸 PAYOUT ${net:,.2f}", disabled=is_processing):
-                st.session_state.user_state['payout_processing'] = True
-                atomic_payout()
-                st.rerun()
-        
-        if st.session_state.user_state.get('payout_success'):
-            st.success("TRANSFER COMPLETE")
-            receipt_html = create_receipt_html(
-                user['name'], 
-                st.session_state.user_state['last_payout'], 
-                st.session_state.user_state['last_tx_id']
-            )
-            b64 = base64.b64encode(receipt_html.encode()).decode()
-            href = f'<a href="data:text/html;base64,{b64}" download="PAY_STUB.html">'
-            href += '<button style="width:100%; height:50px; background:#4CAF50; color:white; border:none; border-radius:10px;">📥 DOWNLOAD OFFICIAL RECEIPT</button></a>'
-            st.markdown(href, unsafe_allow_html=True)
+if nav == "DASHBOARD":
+    st.markdown(f"""<div class="hero-header"><h2>EC ENTERPRISE</h2><div>OPERATOR: {user['name'].upper()}</div></div>""", unsafe_allow_html=True)
     
-    elif nav_selection == "MARKETPLACE":
-        st.markdown("### 🏥 SHIFT MARKETPLACE (EST)")
-        tab1, tab2 = st.tabs(["BROWSE SHIFTS", "POST SHIFT"])
-        with tab1:
-            try:
-                client = get_db_connection()
-                if client:
-                    sheet = client.open("ec_database").worksheet("marketplace")
-                    data = sheet.get_all_records()
-                    available = [x for x in data if x.get('role') == user['role'] and x.get('status') == "OPEN"]
-                    if available:
-                        for shift in available:
-                            with st.expander(f"📅 {shift['date']} | {shift['start']} - {shift['end']} (${shift['rate']}/hr)"):
-                                st.caption(f"POSTED BY: {shift['poster_pin']}")
-                                if st.button(f"CLAIM SHIFT ({shift['id']})"):
-                                    if claim_shift(shift['id'], pin):
-                                        st.success("SHIFT CLAIMED!")
-                                        time.sleep(1)
-                                        st.rerun()
-                                    else: st.error("ERROR CLAIMING")
-                    else: st.info("NO SHIFTS AVAILABLE")
-            except: st.write("Marketplace DB Not Found.")
-        with tab2:
-            with st.form("post_shift"):
-                st.caption(f"POSTING AS: {user['name']} (Rate: ${user['rate']}/hr)")
-                c1, c2 = st.columns(2)
-                d = c1.date_input("Date")
-                s = c1.time_input("Start (EST)")
-                e = c2.time_input("End (EST)")
-                if st.form_submit_button("POST SHIFT"):
-                    if post_shift_to_market(pin, user['role'], d, s, e, user['rate']): st.success("SHIFT POSTED")
-                    else: st.error("DB Error")
+    # PULSE & GEO
+    st_autorefresh(interval=10000)
+    loc = get_geolocation(component_key="gps")
+    lat, lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc else (0,0)
+    
+    # VIP BADGE
+    if str(pin) == "1001": st.markdown('<div class="status-pill vip-mode">🌟 VIP EXECUTIVE</div>', unsafe_allow_html=True)
+    else: st.markdown('<div class="status-pill safe-mode">🛡️ IRON DOME ACTIVE</div>', unsafe_allow_html=True)
 
-    elif nav_selection == "SCHEDULER":
-        st.markdown("### 📅 Rolling Schedule (EST)")
-        with st.form("sched"):
-            c1, c2 = st.columns(2)
-            d = c1.date_input("Date")
-            s = c1.time_input("Start")
-            e = c2.time_input("End")
-            if st.form_submit_button("Add Shift"):
-                if log_schedule(pin, d, s, e): st.success("Added")
-                else: st.error("Error")
-        try:
-            client = get_db_connection()
-            if client:
-                sheet = client.open("ec_database").worksheet("schedule")
-                data = sheet.get_all_records()
-                my_data = [x for x in data if str(x.get('pin')).strip() == str(pin).strip()]
-                if my_data: st.dataframe(pd.DataFrame(my_data))
-                else: st.info("No Shifts")
-        except: st.write("DB Error")
+    # METRICS
+    active = st.session_state.user_state['active']
+    if active:
+        hrs = (time.time() - st.session_state.user_state['start_time']) / 3600
+        st.session_state.user_state['earnings'] = hrs * user['rate']
+    
+    gross = st.session_state.user_state['earnings']
+    net = gross * (1 - sum(TAX_RATES.values()))
+    
+    c1, c2 = st.columns(2)
+    c1.metric("GROSS", f"${gross:,.2f}")
+    c2.metric("NET AVAIL", f"${net:,.2f}")
 
-    elif nav_selection == "LOGS":
-        st.markdown("### 📂 Logs")
-        try:
-            client = get_db_connection()
-            if client:
-                st.write("Transactions")
-                tx_sheet = client.open("ec_database").worksheet("transactions")
-                st.dataframe(pd.DataFrame(tx_sheet.get_all_records()))
-                st.write("Activity")
-                hx_sheet = client.open("ec_database").worksheet("history")
-                st.dataframe(pd.DataFrame(hx_sheet.get_all_records()))
-        except: st.write("No Data")
+    st.markdown("###")
+
+    # ACTIONS
+    if active:
+        # CLOCK OUT
+        if str(pin) == "1001":
+            if st.button("🔴 END SHIFT (VIP)"):
+                st.session_state.user_state['active'] = False
+                update_status(pin, "Inactive", 0, 0)
+                log_action(pin, "CLOCK OUT", gross, "VIP")
+                st.rerun()
+        else:
+            if not st.session_state.user_state['challenge']: 
+                st.session_state.user_state['challenge'] = random.choice(LIVENESS_CHALLENGES)
+            st.info(f"📸 ACTION: **{st.session_state.user_state['challenge']}**")
+            img = st.camera_input("VERIFY")
+            if img:
+                ok, msg = verify_security(pin, lat, lon, "0.0.0.0", img)
+                if ok:
+                    st.session_state.user_state['active'] = False
+                    st.session_state.user_state['challenge'] = None
+                    update_status(pin, "Inactive", 0, 0)
+                    log_action(pin, "CLOCK OUT", gross, "Verified")
+                    st.rerun()
+                else: st.error(msg)
+    else:
+        # CLOCK IN
+        if str(pin) == "1001":
+            if st.button("🟢 START SHIFT (VIP)"):
+                st.session_state.user_state['active'] = True
+                st.session_state.user_state['start_time'] = time.time()
+                update_status(pin, "Active", time.time(), 0)
+                log_action(pin, "CLOCK IN", 0, "VIP")
+                st.rerun()
+        else:
+            if not st.session_state.user_state['challenge']: 
+                st.session_state.user_state['challenge'] = random.choice(LIVENESS_CHALLENGES)
+            st.info(f"📸 ACTION: **{st.session_state.user_state['challenge']}**")
+            img = st.camera_input("VERIFY")
+            if img:
+                ok, msg = verify_security(pin, lat, lon, "0.0.0.0", img)
+                if ok:
+                    st.session_state.user_state['active'] = True
+                    st.session_state.user_state['start_time'] = time.time()
+                    st.session_state.user_state['challenge'] = None
+                    update_status(pin, "Active", time.time(), 0)
+                    log_action(pin, "CLOCK IN", 0, "Verified")
+                    st.rerun()
+                else: st.error(msg)
+
+    st.markdown("###")
+    
+    # PAYOUT (ATOMIC)
+    if not active and gross > 0.01:
+        if st.button(f"💸 PAYOUT ${net:,.2f}", disabled=st.session_state.user_state['payout_lock']):
+            st.session_state.user_state['payout_lock'] = True
+            tx = log_tx(pin, net)
+            log_action(pin, "PAYOUT", net, "Settled")
+            update_status(pin, "Inactive", 0, 0)
+            st.session_state.user_state['earnings'] = 0.0
+            st.success(f"SENT: {tx}")
+            time.sleep(2)
+            st.session_state.user_state['payout_lock'] = False
+            st.rerun()
+
+elif nav == "MARKETPLACE":
+    st.title("Marketplace")
+    st.info("Connecting to Supabase Live DB...")
+    # Add marketplace SQL queries here later
+
+elif nav == "LOGS":
+    st.title("Audit Logs")
+    try:
+        res = run_query("SELECT * FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
+    except: st.write("No History")
