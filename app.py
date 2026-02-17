@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 import math
-import requests
 import pytz
 import random
 import sqlalchemy
@@ -19,12 +18,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. SMART LIBRARY LOADER (Prevents Crashes) ---
+# --- 2. LIBRARY LOADER ---
 try:
     import face_recognition
     BIO_ENGINE_AVAILABLE = True
 except ImportError:
-    BIO_ENGINE_AVAILABLE = False # Automatically enables Simulation Mode
+    BIO_ENGINE_AVAILABLE = False
+    class Point:
+        def __init__(self, x, y): self.x, self.y = x, y
+    class Polygon:
+        def __init__(self, points): self.points = points
+        def contains(self, point): return True 
 
 # --- 3. STYLING ---
 st.markdown("""
@@ -57,41 +61,52 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. SUPABASE CONNECTION ---
+# --- 5. DATABASE ENGINE (LOUD DEBUG MODE) ---
 @st.cache_resource
 def get_db_engine():
     try:
         url = st.secrets["SUPABASE_URL"]
         if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
         return create_engine(url)
-    except: return None
+    except Exception as e:
+        st.error(f"🚨 DB CONNECTION FAILED: {e}")
+        return None
 
 def run_query(query, params=None):
     engine = get_db_engine()
     if not engine: return None
-    with engine.connect() as conn:
-        return conn.execute(text(query), params or {})
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text(query), params or {})
+    except Exception as e:
+        st.error(f"QUERY ERROR: {e}")
+        return None
 
 def run_transaction(query, params=None):
     engine = get_db_engine()
     if not engine: return
-    with engine.begin() as conn:
-        conn.execute(text(query), params or {})
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(query), params or {})
+    except Exception as e:
+        st.error(f"SAVE ERROR: {e}")
 
-# --- 6. CORE LOGIC ---
+# --- 6. CORE LOGIC (DB SYNC) ---
 def force_cloud_sync(pin):
     try:
-        res = run_query("SELECT status, start_time, earnings FROM workers WHERE pin = :pin", {"pin": pin})
-        row = res.fetchone()
-        if row and row[0].lower() == 'active':
-            st.session_state.user_state['active'] = True
-            st.session_state.user_state['start_time'] = float(row[1])
-            return True
+        res = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
+        if res:
+            row = res.fetchone()
+            if row and row[0].lower() == 'active':
+                st.session_state.user_state['active'] = True
+                st.session_state.user_state['start_time'] = float(row[1])
+                return True
         st.session_state.user_state['active'] = False
         return False
     except: return False
 
 def update_status(pin, status, start, earn):
+    # UPSERT Logic
     q = """
     INSERT INTO workers (pin, status, start_time, earnings, last_active)
     VALUES (:p, :s, :t, :e, NOW())
@@ -110,13 +125,23 @@ def log_action(pin, action, amount, note):
     q = "INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)"
     run_transaction(q, {"p": pin, "a": action, "amt": amount, "n": note})
 
-# --- 7. SECURITY GATES (LIGHTWEIGHT EDITION) ---
+def post_shift_db(pin, role, date, start, end, rate):
+    shift_id = f"SHIFT-{int(time.time())}"
+    q = """
+    INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status)
+    VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')
+    """
+    run_transaction(q, {"id": shift_id, "p": pin, "r": role, "d": date, "s": str(start), "e": str(end), "rt": rate})
+
+def claim_shift_db(shift_id, claimer_pin):
+    q = "UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id"
+    run_transaction(q, {"p": claimer_pin, "id": shift_id})
+
+# --- 7. SECURITY GATES ---
 def verify_security(pin, lat, lon, ip, img):
-    # VIP BYPASS (1001)
-    if str(pin) == "1001": return True, "VIP ACCESS GRANTED"
+    if str(pin) == "1001": return True, "VIP ACCESS"
     
-    # IRON DOME CHECKS
-    # 1. Geofence
+    # Iron Dome
     target_lat, target_lon = 42.0875, -70.9915
     R = 6371000
     lat1, lon1 = math.radians(lat), math.radians(lon)
@@ -124,16 +149,12 @@ def verify_security(pin, lat, lon, ip, img):
     a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2) * math.sin((lon2-lon1)/2)**2
     dist = R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
     
-    # In Pilot/Dev mode, we might relax this or use a larger radius
     if dist > GEOFENCE_RADIUS: return False, f"GEOFENCE FAIL ({int(dist)}m)"
     
-    # 2. Bio-Liveness (SIMULATION MODE)
-    if not BIO_ENGINE_AVAILABLE: 
-        # Since we removed the heavy library, we simulate the check
-        time.sleep(1.5) # Simulate processing time
-        return True, "BIO VERIFIED (SIMULATION)"
+    if not BIO_ENGINE_AVAILABLE:
+        time.sleep(1.5)
+        return True, "BIO SIMULATED"
     
-    # This part only runs if you reinstall the library later
     try:
         f_img = face_recognition.load_image_file(img)
         if len(face_recognition.face_locations(f_img)) < 1: return False, "NO FACE DETECTED"
@@ -173,16 +194,13 @@ with st.sidebar:
 if nav == "DASHBOARD":
     st.markdown(f"""<div class="hero-header"><h2>EC ENTERPRISE</h2><div>OPERATOR: {user['name'].upper()}</div></div>""", unsafe_allow_html=True)
     
-    # PULSE & GEO
     st_autorefresh(interval=10000)
     loc = get_geolocation(component_key="gps")
     lat, lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc else (0,0)
     
-    # VIP BADGE
     if str(pin) == "1001": st.markdown('<div class="status-pill vip-mode">🌟 VIP EXECUTIVE</div>', unsafe_allow_html=True)
     else: st.markdown('<div class="status-pill safe-mode">🛡️ IRON DOME ACTIVE</div>', unsafe_allow_html=True)
 
-    # METRICS
     active = st.session_state.user_state['active']
     if active:
         hrs = (time.time() - st.session_state.user_state['start_time']) / 3600
@@ -197,9 +215,7 @@ if nav == "DASHBOARD":
 
     st.markdown("###")
 
-    # ACTIONS
     if active:
-        # CLOCK OUT
         if str(pin) == "1001":
             if st.button("🔴 END SHIFT (VIP)"):
                 st.session_state.user_state['active'] = False
@@ -221,7 +237,6 @@ if nav == "DASHBOARD":
                     st.rerun()
                 else: st.error(msg)
     else:
-        # CLOCK IN
         if str(pin) == "1001":
             if st.button("🟢 START SHIFT (VIP)"):
                 st.session_state.user_state['active'] = True
@@ -247,7 +262,6 @@ if nav == "DASHBOARD":
 
     st.markdown("###")
     
-    # PAYOUT (ATOMIC)
     if not active and gross > 0.01:
         if st.button(f"💸 PAYOUT ${net:,.2f}", disabled=st.session_state.user_state['payout_lock']):
             st.session_state.user_state['payout_lock'] = True
@@ -261,12 +275,39 @@ if nav == "DASHBOARD":
             st.rerun()
 
 elif nav == "MARKETPLACE":
-    st.title("Marketplace")
-    st.info("Connecting to Supabase...")
+    st.title("🏥 Shift Marketplace")
+    
+    tab1, tab2 = st.tabs(["BROWSE", "POST SHIFT"])
+    
+    with tab1:
+        try:
+            res = run_query("SELECT * FROM marketplace WHERE status='OPEN'")
+            shifts = res.fetchall() if res else []
+            if shifts:
+                for s in shifts:
+                    # s structure: shift_id, poster_pin, role, date, start, end, rate, status, claimed_by
+                    with st.expander(f"📅 {s[3]} | {s[2]} | ${s[6]}/hr"):
+                        st.write(f"Time: {s[4]} - {s[5]}")
+                        if st.button("CLAIM SHIFT", key=s[0]):
+                            claim_shift_db(s[0], pin)
+                            st.success("CLAIMED!")
+                            st.rerun()
+            else:
+                st.info("No Open Shifts")
+        except Exception as e:
+            st.error(f"Error loading shifts: {e}")
+
+    with tab2:
+        with st.form("new_shift"):
+            d = st.date_input("Date")
+            c1, c2 = st.columns(2)
+            s_time = c1.time_input("Start")
+            e_time = c2.time_input("End")
+            if st.form_submit_button("POST"):
+                post_shift_db(pin, user['role'], d, s_time, e_time, user['rate'])
+                st.success("Posted!")
 
 elif nav == "LOGS":
     st.title("Audit Logs")
     try:
-        res = run_query("SELECT * FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
-        if res: st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
-    except: st.write("No History")
+        res = run_query("SELECT * FROM history WHERE pin
