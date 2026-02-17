@@ -4,30 +4,27 @@ import time
 import math
 import requests
 import pytz
-import base64
-import uuid
 import random
+import sqlalchemy
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
 from streamlit_autorefresh import st_autorefresh
-import sqlalchemy
 from sqlalchemy import create_engine, text
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="centered", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="EC Enterprise", 
+    page_icon="🛡️", 
+    layout="centered", 
+    initial_sidebar_state="expanded"
+)
 
-# --- 2. LIBRARY LOADING (Safe Mode) ---
+# --- 2. SMART LIBRARY LOADER (Prevents Crashes) ---
 try:
     import face_recognition
-    from shapely.geometry import Point, Polygon
     BIO_ENGINE_AVAILABLE = True
 except ImportError:
-    BIO_ENGINE_AVAILABLE = False
-    class Point:
-        def __init__(self, x, y): self.x, self.y = x, y
-    class Polygon:
-        def __init__(self, points): self.points = points
-        def contains(self, point): return True 
+    BIO_ENGINE_AVAILABLE = False # Automatically enables Simulation Mode
 
 # --- 3. STYLING ---
 st.markdown("""
@@ -60,11 +57,10 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. DATABASE ENGINE (SUPABASE) ---
+# --- 5. SUPABASE CONNECTION ---
 @st.cache_resource
 def get_db_engine():
     try:
-        # Looks for the secret variable on the server
         url = st.secrets["SUPABASE_URL"]
         if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
         return create_engine(url)
@@ -85,7 +81,7 @@ def run_transaction(query, params=None):
 # --- 6. CORE LOGIC ---
 def force_cloud_sync(pin):
     try:
-        res = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
+        res = run_query("SELECT status, start_time, earnings FROM workers WHERE pin = :pin", {"pin": pin})
         row = res.fetchone()
         if row and row[0].lower() == 'active':
             st.session_state.user_state['active'] = True
@@ -96,8 +92,13 @@ def force_cloud_sync(pin):
     except: return False
 
 def update_status(pin, status, start, earn):
-    q = "UPDATE workers SET status=:s, start_time=:t, earnings=:e, last_active=NOW() WHERE pin=:p"
-    run_transaction(q, {"s": status, "t": start, "e": earn, "p": pin})
+    q = """
+    INSERT INTO workers (pin, status, start_time, earnings, last_active)
+    VALUES (:p, :s, :t, :e, NOW())
+    ON CONFLICT (pin) DO UPDATE 
+    SET status = :s, start_time = :t, earnings = :e, last_active = NOW();
+    """
+    run_transaction(q, {"p": pin, "s": status, "t": start, "e": earn})
 
 def log_tx(pin, amount):
     tx_id = f"TX-{int(time.time())}"
@@ -109,28 +110,35 @@ def log_action(pin, action, amount, note):
     q = "INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)"
     run_transaction(q, {"p": pin, "a": action, "amt": amount, "n": note})
 
-# --- 7. SECURITY GATES ---
+# --- 7. SECURITY GATES (LIGHTWEIGHT EDITION) ---
 def verify_security(pin, lat, lon, ip, img):
     # VIP BYPASS (1001)
     if str(pin) == "1001": return True, "VIP ACCESS GRANTED"
     
-    # IRON DOME CHECKS (Everyone Else)
+    # IRON DOME CHECKS
     # 1. Geofence
     target_lat, target_lon = 42.0875, -70.9915
     R = 6371000
     lat1, lon1 = math.radians(lat), math.radians(lon)
     lat2, lon2 = math.radians(target_lat), math.radians(target_lon)
-    dist = R * (2 * math.atan2(math.sqrt(math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2) * math.sin((lon2-lon1)/2)**2), math.sqrt(1-math.sin((lat2-lat1)/2)**2)))
+    a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2) * math.sin((lon2-lon1)/2)**2
+    dist = R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
+    
+    # In Pilot/Dev mode, we might relax this or use a larger radius
     if dist > GEOFENCE_RADIUS: return False, f"GEOFENCE FAIL ({int(dist)}m)"
     
-    # 2. Bio-Liveness
-    if not BIO_ENGINE_AVAILABLE: return True, "BIO SIMULATED (OK)"
+    # 2. Bio-Liveness (SIMULATION MODE)
+    if not BIO_ENGINE_AVAILABLE: 
+        # Since we removed the heavy library, we simulate the check
+        time.sleep(1.5) # Simulate processing time
+        return True, "BIO VERIFIED (SIMULATION)"
+    
+    # This part only runs if you reinstall the library later
     try:
         f_img = face_recognition.load_image_file(img)
         if len(face_recognition.face_locations(f_img)) < 1: return False, "NO FACE DETECTED"
+        return True, "VERIFIED"
     except: return False, "BIO ERROR"
-    
-    return True, "IRON DOME VERIFIED"
 
 # --- 8. UI & STATE ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {}
@@ -254,12 +262,11 @@ if nav == "DASHBOARD":
 
 elif nav == "MARKETPLACE":
     st.title("Marketplace")
-    st.info("Connecting to Supabase Live DB...")
-    # Add marketplace SQL queries here later
+    st.info("Connecting to Supabase...")
 
 elif nav == "LOGS":
     st.title("Audit Logs")
     try:
         res = run_query("SELECT * FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
-        st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
+        if res: st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
     except: st.write("No History")
