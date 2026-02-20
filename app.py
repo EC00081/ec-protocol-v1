@@ -4,6 +4,7 @@ import time
 import math
 import pytz
 import random
+import os
 import sqlalchemy
 from datetime import datetime
 from streamlit_js_eval import get_geolocation
@@ -15,7 +16,7 @@ st.set_page_config(
     page_title="EC Enterprise", 
     page_icon="🛡️", 
     layout="centered", 
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # --- 2. LIBRARY LOADER ---
@@ -30,20 +31,94 @@ except ImportError:
         def __init__(self, points): self.points = points
         def contains(self, point): return True 
 
-# --- 3. STYLING ---
+# --- 3. PROFESSIONAL UI STYLING (CSS) ---
 st.markdown("""
-    <head><meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#0E1117"></head>
+    <head>
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="theme-color" content="#0f172a">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    </head>
     <style>
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    .stApp { background: radial-gradient(circle at 50% -20%, #1c2331, #0E1117); color: #FFFFFF; font-family: 'Inter', sans-serif; }
-    div[data-testid="stMap"] { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2); }
-    .status-pill { display: flex; align-items: center; justify-content: center; padding: 12px; border-radius: 50px; font-weight: 600; margin-bottom: 20px; backdrop-filter: blur(10px); }
-    .safe-mode { background: rgba(28, 79, 46, 0.4); border: 1px solid #2e7d32; color: #4caf50; }
-    .danger-mode { background: rgba(79, 28, 28, 0.4); border: 1px solid #c62828; color: #ff5252; }
-    .vip-mode { background: rgba(255, 215, 0, 0.2); border: 1px solid #FFD700; color: #FFD700; }
-    div[data-testid="metric-container"] { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; }
-    .stButton>button { width: 100%; height: 60px; border-radius: 12px; font-weight: 700; border: none; }
-    .hero-header { text-align: center; padding: 30px 20px; background: linear-gradient(180deg, rgba(14,17,23,0) 0%, rgba(14,17,23,1) 100%), url("https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2670&auto=format&fit=crop"); background-size: cover; border-radius: 0 0 24px 24px; margin-top: -60px; margin-bottom: 30px; }
+    /* GLOBAL RESET */
+    * { font-family: 'Inter', sans-serif !important; }
+    
+    /* APP BACKGROUND - Midnight Enterprise Theme */
+    .stApp {
+        background: radial-gradient(circle at 50% 0%, #1e293b, #0f172a);
+        color: #f8fafc;
+    }
+
+    /* HIDE STREAMLIT CHROME */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* METRIC CARDS */
+    div[data-testid="metric-container"] {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        backdrop-filter: blur(5px);
+    }
+    div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; }
+    div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 1.8rem; font-weight: 800; }
+
+    /* ACTION BUTTONS */
+    .stButton>button {
+        width: 100%;
+        height: 65px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 1.1rem;
+        border: none;
+        transition: all 0.2s ease;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    
+    /* CUSTOM STATUS PILLS */
+    .status-pill {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 0.9rem;
+        margin-bottom: 20px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+    }
+    .vip-mode {
+        background: linear-gradient(135deg, #FFD700 0%, #B8860B 100%);
+        color: #000;
+        box-shadow: 0 0 20px rgba(255, 215, 0, 0.3);
+    }
+    .safe-mode {
+        background: rgba(16, 185, 129, 0.2);
+        border: 1px solid #10b981;
+        color: #34d399;
+    }
+    
+    /* INPUT FIELDS */
+    .stTextInput>div>div>input {
+        background-color: rgba(255,255,255,0.05);
+        color: white;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.1);
+        height: 50px;
+    }
+
+    /* MARKETPLACE CARDS */
+    .shift-card {
+        background: rgba(255,255,255,0.03);
+        border-left: 4px solid #3b82f6;
+        padding: 15px;
+        margin-bottom: 10px;
+        border-radius: 0 12px 12px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -61,12 +136,24 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. DATABASE ENGINE (BULLETPROOF) ---
+# --- 5. DATABASE ENGINE (FIXED FOR RENDER ENVIRONMENT) ---
 @st.cache_resource
 def get_db_engine():
     try:
-        url = st.secrets["SUPABASE_URL"]
-        if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
+        # Check standard OS environment variables first (This is what Render uses)
+        url = os.environ.get("SUPABASE_URL")
+        
+        # Fallback to Streamlit secrets just in case you run it locally later
+        if not url and "SUPABASE_URL" in st.secrets:
+            url = st.secrets["SUPABASE_URL"]
+            
+        if not url:
+            st.error("🚨 CRITICAL: SUPABASE_URL not found in Render Environment Variables!")
+            return None
+
+        if url.startswith("postgres://"): 
+            url = url.replace("postgres://", "postgresql://", 1)
+            
         return create_engine(url, isolation_level="AUTOCOMMIT")
     except Exception as e:
         st.error(f"🚨 DB CONNECTION FAILED: {e}")
@@ -78,7 +165,6 @@ def run_query(query, params=None):
     try:
         with engine.connect() as conn:
             result = conn.execute(text(query), params or {})
-            # CRITICAL FIX: Fetch the data BEFORE closing the connection
             return result.fetchall() 
     except Exception as e:
         st.error(f"QUERY ERROR: {e}")
@@ -93,19 +179,16 @@ def run_transaction(query, params=None):
     except Exception as e:
         st.error(f"SAVE ERROR: {e}")
 
-# --- 6. CORE LOGIC (DB SYNC) ---
+# --- 6. CORE LOGIC ---
 def force_cloud_sync(pin):
     try:
-        # Since run_query now returns a list of rows, we check the list directly
         rows = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
-        
         if rows and len(rows) > 0:
             row = rows[0]
             if row[0].lower() == 'active':
                 st.session_state.user_state['active'] = True
                 st.session_state.user_state['start_time'] = float(row[1])
                 return True
-                
         st.session_state.user_state['active'] = False
         return False
     except Exception as e: 
@@ -142,11 +225,11 @@ def post_shift_db(pin, role, date, start, end, rate):
 def claim_shift_db(shift_id, claimer_pin):
     q = "UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id"
     run_transaction(q, {"p": claimer_pin, "id": shift_id})
+
 # --- 7. SECURITY GATES ---
 def verify_security(pin, lat, lon, ip, img):
     if str(pin) == "1001": return True, "VIP ACCESS"
     
-    # Iron Dome
     target_lat, target_lon = 42.0875, -70.9915
     R = 6371000
     lat1, lon1 = math.radians(lat), math.radians(lon)
@@ -174,37 +257,46 @@ for k, v in defaults.items():
 
 # --- 9. AUTH SCREEN ---
 if 'logged_in_user' not in st.session_state:
-    st.markdown("<h1 style='text-align: center;'>🛡️ EC PROTOCOL</h1>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        pin = st.text_input("ACCESS CODE", type="password")
-        if st.button("AUTHENTICATE"):
-            if pin in USERS:
-                st.session_state.logged_in_user = USERS[pin]
-                st.session_state.pin = pin
-                force_cloud_sync(pin)
-                st.rerun()
-            else: st.error("INVALID PIN")
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; color: #f8fafc; letter-spacing: 2px;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #64748b; font-size: 0.9rem;'>SECURE WORKFORCE ACCESS</p>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    pin = st.text_input("ACCESS CODE", type="password", placeholder="Enter your 4-digit PIN")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("AUTHENTICATE SYSTEM"):
+        if pin in USERS:
+            st.session_state.logged_in_user = USERS[pin]
+            st.session_state.pin = pin
+            force_cloud_sync(pin)
+            st.rerun()
+        else: st.error("INVALID CREDENTIALS")
     st.stop()
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 10. MAIN APP ---
+# --- 10. MAIN DASHBOARD ---
 with st.sidebar:
-    st.markdown("### 🧭 NAVIGATION")
-    nav = st.radio("GO TO:", ["DASHBOARD", "MARKETPLACE", "LOGS"])
+    st.caption(f"LOGGED IN AS: {user['name'].upper()}")
+    nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "LOGS"])
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
 if nav == "DASHBOARD":
-    st.markdown(f"""<div class="hero-header"><h2>EC ENTERPRISE</h2><div>OPERATOR: {user['name'].upper()}</div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""
+        <div style="padding: 20px 0; border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px;">
+            <h2 style="margin:0; font-size:1.5rem;">Good Morning, {user['name'].split(' ')[0]}</h2>
+            <p style="margin:0; color: #94a3b8;">{get_local_now()}</p>
+        </div>
+    """, unsafe_allow_html=True)
     
     st_autorefresh(interval=10000)
     loc = get_geolocation(component_key="gps")
     lat, lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc else (0,0)
     
-    if str(pin) == "1001": st.markdown('<div class="status-pill vip-mode">🌟 VIP EXECUTIVE</div>', unsafe_allow_html=True)
-    else: st.markdown('<div class="status-pill safe-mode">🛡️ IRON DOME ACTIVE</div>', unsafe_allow_html=True)
+    if str(pin) == "1001": st.markdown('<div class="status-pill vip-mode">⭐ EXECUTIVE VIP ACCESS</div>', unsafe_allow_html=True)
+    else: st.markdown('<div class="status-pill safe-mode">🛡️ IRON DOME SECURE</div>', unsafe_allow_html=True)
 
     active = st.session_state.user_state['active']
     if active:
@@ -215,25 +307,25 @@ if nav == "DASHBOARD":
     net = gross * (1 - sum(TAX_RATES.values()))
     
     c1, c2 = st.columns(2)
-    c1.metric("GROSS", f"${gross:,.2f}")
-    c2.metric("NET AVAIL", f"${net:,.2f}")
+    c1.metric("CURRENT EARNINGS", f"${gross:,.2f}")
+    c2.metric("NET PAYOUT", f"${net:,.2f}")
 
-    st.markdown("###")
+    st.markdown("<br>", unsafe_allow_html=True)
 
     if active:
         if str(pin) == "1001":
-            if st.button("🔴 END SHIFT (VIP)"):
+            if st.button("🔴 END SHIFT"):
                 st.session_state.user_state['active'] = False
                 update_status(pin, "Inactive", 0, 0)
                 log_action(pin, "CLOCK OUT", gross, "VIP")
-                st.success("✅ Clock Out Saved to Database")
+                st.success("SHIFT ENDED")
                 time.sleep(1)
                 st.rerun()
         else:
             if not st.session_state.user_state['challenge']: 
                 st.session_state.user_state['challenge'] = random.choice(LIVENESS_CHALLENGES)
-            st.info(f"📸 ACTION: **{st.session_state.user_state['challenge']}**")
-            img = st.camera_input("VERIFY")
+            st.info(f"ACTION REQUIRED: {st.session_state.user_state['challenge']}")
+            img = st.camera_input("VERIFY IDENTITY")
             if img:
                 ok, msg = verify_security(pin, lat, lon, "0.0.0.0", img)
                 if ok:
@@ -241,25 +333,25 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['challenge'] = None
                     update_status(pin, "Inactive", 0, 0)
                     log_action(pin, "CLOCK OUT", gross, "Verified")
-                    st.success("✅ Clock Out Saved to Database")
+                    st.success("SHIFT ENDED")
                     time.sleep(1)
                     st.rerun()
                 else: st.error(msg)
     else:
         if str(pin) == "1001":
-            if st.button("🟢 START SHIFT (VIP)"):
+            if st.button("🟢 START SHIFT"):
                 st.session_state.user_state['active'] = True
                 st.session_state.user_state['start_time'] = time.time()
                 update_status(pin, "Active", time.time(), 0)
                 log_action(pin, "CLOCK IN", 0, "VIP")
-                st.success("✅ Clock In Saved to Database")
+                st.success("SHIFT STARTED")
                 time.sleep(1)
                 st.rerun()
         else:
             if not st.session_state.user_state['challenge']: 
                 st.session_state.user_state['challenge'] = random.choice(LIVENESS_CHALLENGES)
-            st.info(f"📸 ACTION: **{st.session_state.user_state['challenge']}**")
-            img = st.camera_input("VERIFY")
+            st.info(f"ACTION REQUIRED: {st.session_state.user_state['challenge']}")
+            img = st.camera_input("VERIFY IDENTITY")
             if img:
                 ok, msg = verify_security(pin, lat, lon, "0.0.0.0", img)
                 if ok:
@@ -268,48 +360,51 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['challenge'] = None
                     update_status(pin, "Active", time.time(), 0)
                     log_action(pin, "CLOCK IN", 0, "Verified")
-                    st.success("✅ Clock In Saved to Database")
+                    st.success("SHIFT STARTED")
                     time.sleep(1)
                     st.rerun()
                 else: st.error(msg)
 
-    st.markdown("###")
+    st.markdown("<br>", unsafe_allow_html=True)
     
     if not active and gross > 0.01:
-        if st.button(f"💸 PAYOUT ${net:,.2f}", disabled=st.session_state.user_state['payout_lock']):
+        if st.button(f"💸 INSTANT TRANSFER (${net:,.2f})", disabled=st.session_state.user_state['payout_lock']):
             st.session_state.user_state['payout_lock'] = True
             tx = log_tx(pin, net)
             log_action(pin, "PAYOUT", net, "Settled")
             update_status(pin, "Inactive", 0, 0)
             st.session_state.user_state['earnings'] = 0.0
-            st.success(f"✅ Payout Sent: {tx}")
+            st.success(f"FUNDS SENT: {tx}")
             time.sleep(2)
             st.session_state.user_state['payout_lock'] = False
             st.rerun()
 
 elif nav == "MARKETPLACE":
-    st.title("🏥 Shift Marketplace")
+    st.markdown("## 🏥 Shift Exchange")
     
-    tab1, tab2 = st.tabs(["BROWSE", "POST SHIFT"])
+    tab1, tab2 = st.tabs(["OPEN SHIFTS", "POST NEW"])
     
     with tab1:
         try:
-            res = run_query("SELECT * FROM marketplace WHERE status='OPEN'")
-            shifts = res.fetchall() if res else []
-            if shifts:
-                for s in shifts:
-                    # s structure: shift_id, poster_pin, role, date, start, end, rate, status, claimed_by
-                    with st.expander(f"📅 {s[3]} | {s[2]} | ${s[6]}/hr"):
-                        st.write(f"Time: {s[4]} - {s[5]}")
-                        if st.button("CLAIM SHIFT", key=s[0]):
-                            claim_shift_db(s[0], pin)
-                            st.success("✅ Shift Claimed & Saved!")
-                            time.sleep(1)
-                            st.rerun()
+            # Added column names to index safely
+            res = run_query("SELECT shift_id, poster_pin, role, date, start_time, end_time, rate, status FROM marketplace WHERE status='OPEN'")
+            if res:
+                for s in res:
+                    st.markdown(f"""
+                    <div class="shift-card">
+                        <div style="font-weight:bold; font-size:1.1rem;">{s[3]} | {s[2]}</div>
+                        <div style="color:#94a3b8;">{s[4]} - {s[5]} @ ${s[6]}/hr</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button("CLAIM SHIFT", key=s[0]):
+                        claim_shift_db(s[0], pin)
+                        st.success("✅ Shift Added to Schedule")
+                        time.sleep(1)
+                        st.rerun()
             else:
-                st.info("No Open Shifts")
+                st.info("No open shifts available in your region.")
         except Exception as e:
-            st.error(f"Error loading shifts: {e}")
+            st.error(f"Connection Error: {e}")
 
     with tab2:
         with st.form("new_shift"):
@@ -317,15 +412,20 @@ elif nav == "MARKETPLACE":
             c1, c2 = st.columns(2)
             s_time = c1.time_input("Start")
             e_time = c2.time_input("End")
-            if st.form_submit_button("POST"):
+            if st.form_submit_button("PUBLISH TO MARKET"):
                 post_shift_db(pin, user['role'], d, s_time, e_time, user['rate'])
-                st.success("✅ Shift Posted to Database!")
+                st.success("Shift Published!")
 
 elif nav == "LOGS":
-    st.title("Audit Logs")
+    st.markdown("## 📂 Audit Trail")
     try:
-        # SHORTENED LINE TO PREVENT SYNTAX ERRORS
-        query = "SELECT * FROM history WHERE pin=:p ORDER BY timestamp DESC"
+        query = "SELECT pin, action, timestamp, amount, note FROM history WHERE pin=:p ORDER BY timestamp DESC"
         res = run_query(query, {"p": pin})
-        if res: st.dataframe(pd.DataFrame(res.fetchall(), columns=res.keys()))
-    except: st.write("No History")
+        if res: 
+            # Safely create dataframe directly from rows
+            df = pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"])
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.write("No records found.")
+    except Exception as e: 
+        st.write(f"Log Error: {e}")
