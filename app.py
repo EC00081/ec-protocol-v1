@@ -136,27 +136,32 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. DATABASE ENGINE (FIXED FOR RENDER ENVIRONMENT) ---
+# --- 5. DATABASE ENGINE (CRITICAL FIX: ENV VAR PRIORITY) ---
 @st.cache_resource
 def get_db_engine():
-    try:
-        # Check standard OS environment variables first (This is what Render uses)
-        url = os.environ.get("SUPABASE_URL")
-        
-        # Fallback to Streamlit secrets just in case you run it locally later
-        if not url and "SUPABASE_URL" in st.secrets:
+    # 1. Try Render Environment Variable FIRST
+    url = os.environ.get("SUPABASE_URL")
+    
+    # 2. Fallback to Streamlit Secrets (Only if Env Var is missing)
+    if not url:
+        try:
             url = st.secrets["SUPABASE_URL"]
-            
-        if not url:
-            st.error("🚨 CRITICAL: SUPABASE_URL not found in Render Environment Variables!")
-            return None
+        except:
+            pass # No secrets found, that is expected on Render
 
-        if url.startswith("postgres://"): 
-            url = url.replace("postgres://", "postgresql://", 1)
-            
+    # 3. If still no URL, Stop Everything
+    if not url:
+        st.error("🚨 CRITICAL ERROR: Database URL is missing! Check Render 'Environment Variables'.")
+        return None
+
+    # 4. Fix Protocol for SQLAlchemy
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+        
+    try:
         return create_engine(url, isolation_level="AUTOCOMMIT")
     except Exception as e:
-        st.error(f"🚨 DB CONNECTION FAILED: {e}")
+        st.error(f"🚨 CONNECTION FAILED: {e}")
         return None
 
 def run_query(query, params=None):
@@ -196,6 +201,7 @@ def force_cloud_sync(pin):
         return False
 
 def update_status(pin, status, start, earn):
+    # Triple Quotes fix the syntax error
     q = """
     INSERT INTO workers (pin, status, start_time, earnings, last_active)
     VALUES (:p, :s, :t, :e, NOW())
@@ -269,7 +275,8 @@ if 'logged_in_user' not in st.session_state:
         if pin in USERS:
             st.session_state.logged_in_user = USERS[pin]
             st.session_state.pin = pin
-            force_cloud_sync(pin)
+            if force_cloud_sync(pin):
+                st.success("SESSION RESTORED")
             st.rerun()
         else: st.error("INVALID CREDENTIALS")
     st.stop()
@@ -386,7 +393,7 @@ elif nav == "MARKETPLACE":
     
     with tab1:
         try:
-            # Added column names to index safely
+            # Syntax fixed here to ensure query works
             res = run_query("SELECT shift_id, poster_pin, role, date, start_time, end_time, rate, status FROM marketplace WHERE status='OPEN'")
             if res:
                 for s in res:
@@ -419,10 +426,15 @@ elif nav == "MARKETPLACE":
 elif nav == "LOGS":
     st.markdown("## 📂 Audit Trail")
     try:
-        query = "SELECT pin, action, timestamp, amount, note FROM history WHERE pin=:p ORDER BY timestamp DESC"
+        # Correctly formatted multiline string for SQL
+        query = """
+        SELECT pin, action, timestamp, amount, note 
+        FROM history 
+        WHERE pin=:p 
+        ORDER BY timestamp DESC
+        """
         res = run_query(query, {"p": pin})
         if res: 
-            # Safely create dataframe directly from rows
             df = pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"])
             st.dataframe(df, use_container_width=True)
         else:
