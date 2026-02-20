@@ -61,13 +61,12 @@ USERS = {
 
 def get_local_now(): return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S EST")
 
-# --- 5. DATABASE ENGINE (FORCE COMMIT) ---
+# --- 5. DATABASE ENGINE (BULLETPROOF) ---
 @st.cache_resource
 def get_db_engine():
     try:
         url = st.secrets["SUPABASE_URL"]
         if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
-        # FORCE AUTOCOMMIT to ensure data is saved immediately
         return create_engine(url, isolation_level="AUTOCOMMIT")
     except Exception as e:
         st.error(f"🚨 DB CONNECTION FAILED: {e}")
@@ -78,7 +77,9 @@ def run_query(query, params=None):
     if not engine: return None
     try:
         with engine.connect() as conn:
-            return conn.execute(text(query), params or {})
+            result = conn.execute(text(query), params or {})
+            # CRITICAL FIX: Fetch the data BEFORE closing the connection
+            return result.fetchall() 
     except Exception as e:
         st.error(f"QUERY ERROR: {e}")
         return None
@@ -95,16 +96,21 @@ def run_transaction(query, params=None):
 # --- 6. CORE LOGIC (DB SYNC) ---
 def force_cloud_sync(pin):
     try:
-        res = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
-        if res:
-            row = res.fetchone()
-            if row and row[0].lower() == 'active':
+        # Since run_query now returns a list of rows, we check the list directly
+        rows = run_query("SELECT status, start_time FROM workers WHERE pin = :pin", {"pin": pin})
+        
+        if rows and len(rows) > 0:
+            row = rows[0]
+            if row[0].lower() == 'active':
                 st.session_state.user_state['active'] = True
                 st.session_state.user_state['start_time'] = float(row[1])
                 return True
+                
         st.session_state.user_state['active'] = False
         return False
-    except: return False
+    except Exception as e: 
+        st.error(f"SYNC ERROR: {e}")
+        return False
 
 def update_status(pin, status, start, earn):
     q = """
@@ -136,7 +142,6 @@ def post_shift_db(pin, role, date, start, end, rate):
 def claim_shift_db(shift_id, claimer_pin):
     q = "UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id"
     run_transaction(q, {"p": claimer_pin, "id": shift_id})
-
 # --- 7. SECURITY GATES ---
 def verify_security(pin, lat, lon, ip, img):
     if str(pin) == "1001": return True, "VIP ACCESS"
