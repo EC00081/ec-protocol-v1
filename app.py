@@ -275,39 +275,56 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
 elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
     st.markdown(f"## 📅 System Schedule")
     
-    # MANAGER/DIRECTOR ASSIGNMENT TOOL
+    # DB FETCH FIRST (So the Removal Tool knows what shifts exist)
+    if user['level'] == "Admin":
+        scheds = run_query("SELECT shift_id, pin, shift_date, shift_time, department FROM schedules ORDER BY shift_date ASC, shift_time ASC")
+    else:
+        scheds = run_query("SELECT shift_id, pin, shift_date, shift_time, department FROM schedules WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
+    
+    # MANAGER/DIRECTOR TOOLS (ASSIGN & REMOVE side-by-side)
     if user['level'] in ["Manager", "Director", "Admin"]:
-        with st.expander("🛠️ ASSIGN TEAM SHIFTS"):
-            with st.form("assign_sched"):
-                available_staff = {p: u['name'] for p, u in USERS.items() if (u['dept'] == user['dept'] or user['dept'] == "All") and u['level'] in ["Worker", "Supervisor"]}
-                target_pin = st.selectbox("Select Staff Member", options=list(available_staff.keys()), format_func=lambda x: available_staff[x])
-                
-                s_date = st.date_input("Shift Date")
-                s_time = st.text_input("Shift Time (e.g., 0700-1900)")
-                
-                if st.form_submit_button("Publish to Schedule"):
-                    target_dept = USERS[target_pin]['dept']
-                    db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
-                                    {"id": f"SCH-{int(time.time())}", "p": str(target_pin), "d": str(s_date), "t": str(s_time), "dept": str(target_dept)})
-                    if db_success: 
-                        st.success(f"✅ Shift assigned to {available_staff[target_pin]}")
-                    else: 
-                        st.error("❌ Database Error: Could not save to 'schedules' table.")
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.expander("🛠️ ASSIGN SHIFT"):
+                with st.form("assign_sched"):
+                    available_staff = {p: u['name'] for p, u in USERS.items() if (u['dept'] == user['dept'] or user['dept'] == "All") and u['level'] in ["Worker", "Supervisor"]}
+                    target_pin = st.selectbox("Staff Member", options=list(available_staff.keys()), format_func=lambda x: available_staff[x])
+                    s_date = st.date_input("Shift Date")
+                    s_time = st.text_input("Time (e.g., 0700-1900)")
+                    
+                    if st.form_submit_button("Publish Shift"):
+                        target_dept = USERS[target_pin]['dept']
+                        db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
+                                        {"id": f"SCH-{int(time.time())}", "p": str(target_pin), "d": str(s_date), "t": str(s_time), "dept": str(target_dept)})
+                        if db_success: 
+                            st.success(f"✅ Assigned to {available_staff[target_pin]}")
+                            time.sleep(1); st.rerun()
+                        else: 
+                            st.error("❌ Database Error.")
+        with col2:
+            with st.expander("🗑️ REMOVE SHIFT"):
+                if scheds:
+                    with st.form("remove_sched"):
+                        # Format options cleanly: "YYYY-MM-DD | Liam O'Neil (0700-1900)"
+                        shift_options = {s[0]: f"{s[2]} | {USERS.get(str(s[1]), {}).get('name', s[1])} ({s[3]})" for s in scheds}
+                        target_shift = st.selectbox("Select Shift to Delete", options=list(shift_options.keys()), format_func=lambda x: shift_options[x])
+                        
+                        if st.form_submit_button("Delete Shift"):
+                            if run_transaction("DELETE FROM schedules WHERE shift_id=:id", {"id": target_shift}):
+                                st.success("✅ Shift Removed")
+                                time.sleep(1); st.rerun()
+                            else:
+                                st.error("❌ Database Error.")
+                else:
+                    st.info("No shifts currently scheduled to remove.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # DB FETCH
-    if user['level'] == "Admin":
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules ORDER BY shift_date ASC, shift_time ASC")
-    elif user['level'] in ["Manager", "Director"]:
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
-    else:
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
-    
+    # RENDER THE SCHEDULE CHRONOLOGICALLY
     if scheds:
         grouped_shifts = defaultdict(list)
         for s in scheds:
-            grouped_shifts[s[1]].append(s) 
+            grouped_shifts[s[2]].append(s) # Group by shift_date (s[2])
             
         for date in sorted(grouped_shifts.keys()):
             shifts = grouped_shifts[date]
@@ -320,10 +337,10 @@ elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
             st.markdown(f"<div class='sched-date-header'>🗓️ {formatted_date}</div>", unsafe_allow_html=True)
             
             for shift in shifts:
-                owner_pin = str(shift[0])
+                owner_pin = str(shift[1])
                 owner_name = USERS.get(owner_pin, {}).get('name', f"Unknown User ({owner_pin})")
                 owner_role = USERS.get(owner_pin, {}).get('role', "")
-                time_block = shift[2]
+                time_block = shift[3]
                 
                 personal_indicator = "⭐ " if owner_pin == pin else ""
                 
