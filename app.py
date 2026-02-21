@@ -6,11 +6,12 @@ import pytz
 import random
 import os
 from datetime import datetime
+from collections import defaultdict
 from streamlit_js_eval import get_geolocation
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 
-# --- NEW LIBRARIES (Safely Loaded) ---
+# --- NEW LIBRARIES ---
 try:
     from twilio.rest import Client
     TWILIO_ACTIVE = True
@@ -28,7 +29,6 @@ st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="cent
 
 html_style = """
 <style>
-    /* Safely apply Inter font without breaking Streamlit's Material Icons */
     p, h1, h2, h3, h4, h5, h6, div, label, button, input { font-family: 'Inter', sans-serif !important; }
     .material-symbols-rounded, .material-icons { font-family: 'Material Symbols Rounded' !important; }
     
@@ -44,7 +44,11 @@ html_style = """
     .stTextInput>div>div>input { background-color: rgba(255,255,255,0.05); color: white; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); height: 50px; }
     .shift-card { background: rgba(255,255,255,0.03); border-left: 4px solid #3b82f6; padding: 15px; margin-bottom: 10px; border-radius: 0 12px 12px 0; }
     .admin-card { background: rgba(255, 69, 58, 0.1); border: 1px solid rgba(255, 69, 58, 0.3); padding: 20px; border-radius: 12px; margin-bottom: 15px; }
-    .sched-card { background: rgba(16, 185, 129, 0.05); border-left: 4px solid #10b981; padding: 15px; margin-bottom: 10px; border-radius: 0 12px 12px 0; }
+    .sched-date-header { background: rgba(255,255,255,0.1); padding: 10px 15px; border-radius: 8px; margin-top: 20px; margin-bottom: 10px; font-weight: 800; font-size: 1.2rem; border-left: 4px solid #10b981; }
+    .sched-row { display: flex; justify-content: space-between; padding: 12px 15px; background: rgba(255,255,255,0.02); margin-bottom: 5px; border-radius: 6px; }
+    .sched-time { color: #34d399; font-weight: 700; width: 120px; }
+    .sched-name { font-weight: 600; color: #f8fafc; }
+    .sched-role { color: #94a3b8; font-size: 0.85rem; }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
@@ -163,11 +167,11 @@ with st.sidebar:
     else: st.error("🔴 DB DISCONNECTED")
     
     if user['level'] == "Admin":
-        nav = st.radio("MENU", ["COMMAND CENTER", "AUDIT LOGS"])
+        nav = st.radio("MENU", ["COMMAND CENTER", "MASTER SCHEDULE", "AUDIT LOGS"])
     elif user['level'] in ["Manager", "Director"]:
-        nav = st.radio("MENU", ["DASHBOARD", "DEPT MARKETPLACE", "SCHEDULE", "MY LOGS"])
+        nav = st.radio("MENU", ["DASHBOARD", "DEPT MARKETPLACE", "DEPT SCHEDULE", "MY LOGS"])
     else:
-        nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "MY LOGS"])
+        nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "MY SCHEDULE", "MY LOGS"])
         
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
@@ -175,15 +179,12 @@ with st.sidebar:
 if nav == "COMMAND CENTER" and pin == "9999":
     st.markdown("## 🦅 Command Center")
     st.caption("Live Fleet Overview")
-    
     rows = run_query("SELECT pin, status, start_time, earnings FROM workers WHERE status='Active'")
     if rows:
         for r in rows:
-            w_pin = str(r[0]) # Force string for exact lookup
-            # Look up the real name from USERS dictionary
+            w_pin = str(r[0])
             w_name = USERS.get(w_pin, {}).get("name", f"Unknown User ({w_pin})")
             w_role = USERS.get(w_pin, {}).get("role", "Worker")
-            
             hrs = (time.time() - float(r[2])) / 3600
             current_earn = hrs * USERS.get(w_pin, {}).get("rate", 85)
             
@@ -193,25 +194,19 @@ if nav == "COMMAND CENTER" and pin == "9999":
                 <p style="color:#ff453a; margin-top:5px; font-weight:bold;">🟢 ACTIVE (On Clock: {hrs:.2f} hrs | Accrued: ${current_earn:.2f})</p>
             </div>
             """, unsafe_allow_html=True)
-            
-            # The Override Button
             if st.button(f"🚨 FORCE CLOCK-OUT: {w_name}", key=f"force_{w_pin}"):
                 update_status(w_pin, "Inactive", 0, 0)
                 log_action("9999", "ADMIN FORCE LOGOUT", current_earn, f"Target: {w_name}")
                 st.success(f"Successfully closed shift for {w_name}")
-                time.sleep(1.5)
-                st.rerun()
-    else:
-        st.info("No operators currently active.")
+                time.sleep(1.5); st.rerun()
+    else: st.info("No operators currently active.")
 
 elif nav == "DASHBOARD":
     st.markdown(f"<h2>Good Morning, {user['name'].split(' ')[0]}</h2>", unsafe_allow_html=True)
-    
     active = st.session_state.user_state['active']
     if active:
         hrs = (time.time() - st.session_state.user_state['start_time']) / 3600
         st.session_state.user_state['earnings'] = hrs * user['rate']
-    
     gross = st.session_state.user_state['earnings']
     net = gross * (1 - sum(TAX_RATES.values()))
     
@@ -243,9 +238,7 @@ elif nav == "DASHBOARD":
             log_action(pin, "PAYOUT", net, "Settled")
             update_status(pin, "Inactive", 0, 0)
             st.session_state.user_state['earnings'] = 0.0
-            time.sleep(1)
-            st.session_state.user_state['payout_lock'] = False
-            st.rerun()
+            time.sleep(1); st.session_state.user_state['payout_lock'] = False; st.rerun()
 
 elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
     st.markdown(f"## 🏥 {user['dept']} Shift Exchange")
@@ -267,69 +260,4 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
 
     with tab2:
         with st.form("new_shift"):
-            shift_loc = st.selectbox("Facility", list(HOSPITALS.keys()))
-            d = st.date_input("Date")
-            c1, c2 = st.columns(2)
-            s_time = c1.time_input("Start")
-            e_time = c2.time_input("End")
-            if st.form_submit_button("PUBLISH TO MARKET"):
-                s_id = f"SHIFT-{int(time.time())}"
-                r_loc = f"{user['role']} ({user['dept']}) @ {shift_loc}"
-                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
-                                {"id": s_id, "p": pin, "r": r_loc, "d": d, "s": str(s_time), "e": str(e_time), "rt": user['rate']})
-                st.success("Shift Published!")
-
-elif nav == "SCHEDULE":
-    st.markdown(f"## 📅 {user['dept']} Schedule")
-    
-    # ADD TO CALENDAR WIDGET
-    with st.expander("➕ Add Shift to Calendar"):
-        with st.form("add_sched"):
-            s_date = st.date_input("Shift Date")
-            s_time = st.text_input("Shift Time (e.g. 0700-1900)")
-            if st.form_submit_button("Save to Database"):
-                # Force string conversion to ensure it sticks in the DB
-                db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
-                                {"id": f"SCH-{int(time.time())}", "p": str(pin), "d": str(s_date), "t": str(s_time), "dept": str(user['dept'])})
-                if db_success: st.success("✅ Saved to Calendar!")
-                else: st.error("Failed to save. Did you create the 'schedules' table in Supabase?")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # SPLIT VIEW: MY SCHEDULE vs TEAM SCHEDULE
-    tab1, tab2 = st.tabs(["MY SCHEDULE", "TEAM SCHEDULE"])
-    
-    with tab1:
-        my_scheds = run_query("SELECT shift_date, shift_time FROM schedules WHERE pin=:p ORDER BY shift_date ASC", {"p": pin})
-        if my_scheds:
-            for s in my_scheds:
-                st.markdown(f"""<div class="sched-card"><strong>{s[0]}</strong> | {s[1]}</div>""", unsafe_allow_html=True)
-        else:
-            st.info("You have no upcoming shifts saved.")
-
-    with tab2:
-        # Show everyone in the department EXCEPT the logged-in user
-        team_scheds = run_query("SELECT pin, shift_date, shift_time FROM schedules WHERE department=:d AND pin != :p ORDER BY shift_date ASC", {"d": user['dept'], "p": pin})
-        if team_scheds:
-            for s in team_scheds:
-                owner_pin = str(s[0])
-                # Resolve Name instead of PIN
-                owner_name = USERS.get(owner_pin, {}).get('name', f"Unknown User ({owner_pin})")
-                
-                st.markdown(f"""
-                <div style="background: rgba(255,255,255,0.03); padding: 10px; margin-bottom: 5px; border-radius: 8px;">
-                    <span style="color:#3b82f6; font-weight:bold;">{owner_name}</span> is working on <strong>{s[1]}</strong> ({s[2]})
-                </div>
-                """, unsafe_allow_html=True)
-        else: 
-            st.info("No teammates have posted upcoming shifts.")
-
-elif "LOGS" in nav or nav == "AUDIT LOGS":
-    st.markdown("## 📂 System Records")
-    if user['level'] == "Admin": q = "SELECT pin, action, timestamp, amount, note FROM history ORDER BY timestamp DESC LIMIT 50"; res = run_query(q)
-    else: q = "SELECT pin, action, timestamp, amount, note FROM history WHERE pin=:p ORDER BY timestamp DESC"; res = run_query(q, {"p": pin})
-    
-    if res: 
-        df = pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"])
-        st.dataframe(df, use_container_width=True)
-    else: st.write("No records found.")
+            shift
