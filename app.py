@@ -27,7 +27,10 @@ st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="cent
 
 html_style = """
 <style>
-    * { font-family: 'Inter', sans-serif !important; }
+    /* Safely apply Inter font without breaking Streamlit's Material Icons */
+    p, h1, h2, h3, h4, h5, h6, div, label, button, input { font-family: 'Inter', sans-serif !important; }
+    .material-symbols-rounded, .material-icons { font-family: 'Material Symbols Rounded' !important; }
+    
     .stApp { background: radial-gradient(circle at 50% 0%, #1e293b, #0f172a); color: #f8fafc; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {background: transparent !important;}
     div[data-testid="metric-container"] { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1); backdrop-filter: blur(5px); }
