@@ -28,11 +28,12 @@ st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="cent
 
 html_style = """
 <style>
-    * { font-family: 'Inter', sans-serif !important; }
+    /* Safely apply Inter font without breaking Streamlit's Material Icons */
+    p, h1, h2, h3, h4, h5, h6, div, label, button, input { font-family: 'Inter', sans-serif !important; }
+    .material-symbols-rounded, .material-icons { font-family: 'Material Symbols Rounded' !important; }
+    
     .stApp { background: radial-gradient(circle at 50% 0%, #1e293b, #0f172a); color: #f8fafc; }
-    #MainMenu {visibility: hidden;} 
-    footer {visibility: hidden;} 
-    header {background: transparent !important;} /* FIX: Keeps header transparent but leaves the sidebar arrow visible! */
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {background: transparent !important;}
     div[data-testid="metric-container"] { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1); backdrop-filter: blur(5px); }
     div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 1.8rem; font-weight: 800; }
@@ -42,7 +43,6 @@ html_style = """
     .safe-mode { background: rgba(16, 185, 129, 0.2); border: 1px solid #10b981; color: #34d399; }
     .stTextInput>div>div>input { background-color: rgba(255,255,255,0.05); color: white; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); height: 50px; }
     .shift-card { background: rgba(255,255,255,0.03); border-left: 4px solid #3b82f6; padding: 15px; margin-bottom: 10px; border-radius: 0 12px 12px 0; }
-    .admin-card { background: rgba(255, 69, 58, 0.1); border: 1px solid rgba(255, 69, 58, 0.3); padding: 20px; border-radius: 12px; margin-bottom: 15px; }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
