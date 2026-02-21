@@ -7,3 +7,5 @@ streamlit-js-eval
 streamlit-autorefresh
 sqlalchemy
 psycopg2-binary
+twilio
+fpdf2
