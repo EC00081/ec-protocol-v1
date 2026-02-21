@@ -10,6 +10,7 @@ from streamlit_js_eval import get_geolocation
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 
+# --- NEW LIBRARIES (Safely Loaded) ---
 try:
     from twilio.rest import Client
     TWILIO_ACTIVE = True
@@ -42,6 +43,8 @@ html_style = """
     .safe-mode { background: rgba(16, 185, 129, 0.2); border: 1px solid #10b981; color: #34d399; }
     .stTextInput>div>div>input { background-color: rgba(255,255,255,0.05); color: white; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); height: 50px; }
     .shift-card { background: rgba(255,255,255,0.03); border-left: 4px solid #3b82f6; padding: 15px; margin-bottom: 10px; border-radius: 0 12px 12px 0; }
+    .admin-card { background: rgba(255, 69, 58, 0.1); border: 1px solid rgba(255, 69, 58, 0.3); padding: 20px; border-radius: 12px; margin-bottom: 15px; }
+    .sched-card { background: rgba(16, 185, 129, 0.05); border-left: 4px solid #10b981; padding: 15px; margin-bottom: 10px; border-radius: 0 12px 12px 0; }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
@@ -54,28 +57,25 @@ GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": "ANY", "lon": "ANY"}}
 
 USERS = {
-    # RESPIRATORY DEPT
+    # RESPIRATORY
     "1001": {"name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": "+16175551234"},
     "1002": {"name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": None},
     "1003": {"name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "phone": None},
     "1004": {"name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "phone": None},
     "1005": {"name": "Dr. Alan Grant", "role": "Director", "dept": "Respiratory", "level": "Director", "rate": 0.00, "phone": None},
-    
-    # NURSING DEPT
+    # NURSING
     "2001": {"name": "Emma Watson", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2002": {"name": "John Doe", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2003": {"name": "Alice Smith", "role": "Charge RN", "dept": "Nursing", "level": "Supervisor", "rate": 80.00, "phone": None},
     "2004": {"name": "Robert Brown", "role": "Manager", "dept": "Nursing", "level": "Manager", "rate": 0.00, "phone": None},
     "2005": {"name": "Dr. Sattler", "role": "Director", "dept": "Nursing", "level": "Director", "rate": 0.00, "phone": None},
-
-    # PCA DEPT
+    # PCA
     "3001": {"name": "Mia Wong", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3002": {"name": "Carlos Ruiz", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3003": {"name": "James Lee", "role": "Lead PCA", "dept": "PCA", "level": "Supervisor", "rate": 40.00, "phone": None},
     "3004": {"name": "Linda Davis", "role": "Manager", "dept": "PCA", "level": "Manager", "rate": 0.00, "phone": None},
     "3005": {"name": "Dr. Malcolm", "role": "Director", "dept": "PCA", "level": "Director", "rate": 0.00, "phone": None},
-
-    # COMMAND
+    # ADMIN
     "9999": {"name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "phone": None}
 }
 
@@ -165,14 +165,46 @@ with st.sidebar:
     if user['level'] == "Admin":
         nav = st.radio("MENU", ["COMMAND CENTER", "AUDIT LOGS"])
     elif user['level'] in ["Manager", "Director"]:
-        nav = st.radio("MENU", ["DASHBOARD", "DEPT MARKETPLACE", "TEAM SCHEDULE", "MY LOGS"])
+        nav = st.radio("MENU", ["DASHBOARD", "DEPT MARKETPLACE", "SCHEDULE", "MY LOGS"])
     else:
         nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "MY LOGS"])
         
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
 # --- 7. ROUTING ---
-if nav == "DASHBOARD":
+if nav == "COMMAND CENTER" and pin == "9999":
+    st.markdown("## 🦅 Command Center")
+    st.caption("Live Fleet Overview")
+    
+    rows = run_query("SELECT pin, status, start_time, earnings FROM workers WHERE status='Active'")
+    if rows:
+        for r in rows:
+            w_pin = str(r[0]) # Force string for exact lookup
+            # Look up the real name from USERS dictionary
+            w_name = USERS.get(w_pin, {}).get("name", f"Unknown User ({w_pin})")
+            w_role = USERS.get(w_pin, {}).get("role", "Worker")
+            
+            hrs = (time.time() - float(r[2])) / 3600
+            current_earn = hrs * USERS.get(w_pin, {}).get("rate", 85)
+            
+            st.markdown(f"""
+            <div class="admin-card">
+                <h3 style="margin:0;">{w_name} <span style='color:#94a3b8; font-size:1rem;'>| {w_role}</span></h3>
+                <p style="color:#ff453a; margin-top:5px; font-weight:bold;">🟢 ACTIVE (On Clock: {hrs:.2f} hrs | Accrued: ${current_earn:.2f})</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # The Override Button
+            if st.button(f"🚨 FORCE CLOCK-OUT: {w_name}", key=f"force_{w_pin}"):
+                update_status(w_pin, "Inactive", 0, 0)
+                log_action("9999", "ADMIN FORCE LOGOUT", current_earn, f"Target: {w_name}")
+                st.success(f"Successfully closed shift for {w_name}")
+                time.sleep(1.5)
+                st.rerun()
+    else:
+        st.info("No operators currently active.")
+
+elif nav == "DASHBOARD":
     st.markdown(f"<h2>Good Morning, {user['name'].split(' ')[0]}</h2>", unsafe_allow_html=True)
     
     active = st.session_state.user_state['active']
@@ -219,13 +251,14 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
     st.markdown(f"## 🏥 {user['dept']} Shift Exchange")
     tab1, tab2 = st.tabs(["OPEN SHIFTS", "POST NEW"])
     with tab1:
-        # Managers/Directors only see their department's shifts. Workers see everything open in their dept.
         q = f"SELECT shift_id, poster_pin, role, date, start_time, end_time, rate FROM marketplace WHERE status='OPEN' AND role LIKE '%%{user['dept']}%%'"
         res = run_query(q)
         if res:
             for s in res:
+                poster_name = USERS.get(str(s[1]), {}).get("name", "Unknown Poster")
                 st.markdown(f"""<div class="shift-card"><div style="font-weight:bold; font-size:1.1rem;">{s[3]} | {s[2]}</div>
-                    <div style="color:#94a3b8;">{s[4]} - {s[5]} @ ${s[6]}/hr</div></div>""", unsafe_allow_html=True)
+                    <div style="color:#94a3b8;">{s[4]} - {s[5]} @ ${s[6]}/hr</div>
+                    <div style="color:#64748b; font-size:0.8rem; margin-top:5px;">Posted by: {poster_name}</div></div>""", unsafe_allow_html=True)
                 if user['level'] in ["Worker", "Supervisor"] and st.button("CLAIM", key=s[0]):
                     run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"p": pin, "id": s[0]})
                     st.success("✅ Claimed")
@@ -246,53 +279,57 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
                                 {"id": s_id, "p": pin, "r": r_loc, "d": d, "s": str(s_time), "e": str(e_time), "rt": user['rate']})
                 st.success("Shift Published!")
 
-elif nav in ["SCHEDULE", "TEAM SCHEDULE"]:
+elif nav == "SCHEDULE":
     st.markdown(f"## 📅 {user['dept']} Schedule")
     
-    # 1. Add to Schedule
-    with st.expander("➕ Add My Upcoming Shifts"):
+    # ADD TO CALENDAR WIDGET
+    with st.expander("➕ Add Shift to Calendar"):
         with st.form("add_sched"):
             s_date = st.date_input("Shift Date")
             s_time = st.text_input("Shift Time (e.g. 0700-1900)")
-            if st.form_submit_button("Save to Calendar"):
-                run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
-                                {"id": f"SCH-{int(time.time())}", "p": pin, "d": str(s_date), "t": s_time, "dept": user['dept']})
-                st.success("Saved!")
+            if st.form_submit_button("Save to Database"):
+                # Force string conversion to ensure it sticks in the DB
+                db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
+                                {"id": f"SCH-{int(time.time())}", "p": str(pin), "d": str(s_date), "t": str(s_time), "dept": str(user['dept'])})
+                if db_success: st.success("✅ Saved to Calendar!")
+                else: st.error("Failed to save. Did you create the 'schedules' table in Supabase?")
 
-    # 2. Privacy Controls (Only Workers/Supervisors need this)
-    if user['level'] in ["Worker", "Supervisor"]:
-        with st.expander("🔒 Privacy Settings (Hide my schedule from...)"):
-            peers = {p: u['name'] for p, u in USERS.items() if u['dept'] == user['dept'] and p != pin and u['level'] in ["Worker", "Supervisor"]}
-            blocked_currently = run_query("SELECT blocked_pin FROM schedule_blocks WHERE owner_pin=:p", {"p": pin})
-            blocked_list = [b[0] for b in blocked_currently] if blocked_currently else []
-            
-            selected_blocks = st.multiselect("Select peers who cannot see your schedule:", options=list(peers.keys()), format_func=lambda x: peers[x], default=blocked_list)
-            
-            if st.button("Update Privacy"):
-                run_transaction("DELETE FROM schedule_blocks WHERE owner_pin=:p", {"p": pin})
-                for b_pin in selected_blocks:
-                    run_transaction("INSERT INTO schedule_blocks (owner_pin, blocked_pin) VALUES (:o, :b)", {"o": pin, "b": b_pin})
-                st.success("Privacy Updated. (Note: Managers/Directors bypass these rules).")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # 3. View Department Schedule
-    st.markdown("### Upcoming Team Shifts")
-    dept_scheds = run_query("SELECT pin, shift_date, shift_time FROM schedules WHERE department=:d ORDER BY shift_date ASC", {"d": user['dept']})
+    # SPLIT VIEW: MY SCHEDULE vs TEAM SCHEDULE
+    tab1, tab2 = st.tabs(["MY SCHEDULE", "TEAM SCHEDULE"])
     
-    if dept_scheds:
-        for s in dept_scheds:
-            owner = s[0]
-            # Verify Privacy Override
-            can_view = True
-            if owner != pin and user['level'] not in ["Manager", "Director", "Admin"]:
-                is_blocked = run_query("SELECT 1 FROM schedule_blocks WHERE owner_pin=:o AND blocked_pin=:me", {"o": owner, "me": pin})
-                if is_blocked: can_view = False
-            
-            if can_view:
-                st.markdown(f"**{s[1]}**: {USERS.get(owner, {}).get('name', 'Unknown')} | {s[2]}")
-    else: st.info("No upcoming shifts posted for this department.")
+    with tab1:
+        my_scheds = run_query("SELECT shift_date, shift_time FROM schedules WHERE pin=:p ORDER BY shift_date ASC", {"p": pin})
+        if my_scheds:
+            for s in my_scheds:
+                st.markdown(f"""<div class="sched-card"><strong>{s[0]}</strong> | {s[1]}</div>""", unsafe_allow_html=True)
+        else:
+            st.info("You have no upcoming shifts saved.")
 
-elif "LOGS" in nav or nav == "COMMAND CENTER":
+    with tab2:
+        # Show everyone in the department EXCEPT the logged-in user
+        team_scheds = run_query("SELECT pin, shift_date, shift_time FROM schedules WHERE department=:d AND pin != :p ORDER BY shift_date ASC", {"d": user['dept'], "p": pin})
+        if team_scheds:
+            for s in team_scheds:
+                owner_pin = str(s[0])
+                # Resolve Name instead of PIN
+                owner_name = USERS.get(owner_pin, {}).get('name', f"Unknown User ({owner_pin})")
+                
+                st.markdown(f"""
+                <div style="background: rgba(255,255,255,0.03); padding: 10px; margin-bottom: 5px; border-radius: 8px;">
+                    <span style="color:#3b82f6; font-weight:bold;">{owner_name}</span> is working on <strong>{s[1]}</strong> ({s[2]})
+                </div>
+                """, unsafe_allow_html=True)
+        else: 
+            st.info("No teammates have posted upcoming shifts.")
+
+elif "LOGS" in nav or nav == "AUDIT LOGS":
     st.markdown("## 📂 System Records")
     if user['level'] == "Admin": q = "SELECT pin, action, timestamp, amount, note FROM history ORDER BY timestamp DESC LIMIT 50"; res = run_query(q)
     else: q = "SELECT pin, action, timestamp, amount, note FROM history WHERE pin=:p ORDER BY timestamp DESC"; res = run_query(q, {"p": pin})
-    if res: st.dataframe(pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"]), use_container_width=True)
+    
+    if res: 
+        df = pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"])
+        st.dataframe(df, use_container_width=True)
+    else: st.write("No records found.")
