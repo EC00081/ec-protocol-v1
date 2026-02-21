@@ -30,7 +30,9 @@ html_style = """
 <style>
     * { font-family: 'Inter', sans-serif !important; }
     .stApp { background: radial-gradient(circle at 50% 0%, #1e293b, #0f172a); color: #f8fafc; }
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+    #MainMenu {visibility: hidden;} 
+    footer {visibility: hidden;} 
+    header {background: transparent !important;} /* FIX: Keeps header transparent but leaves the sidebar arrow visible! */
     div[data-testid="metric-container"] { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1); backdrop-filter: blur(5px); }
     div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 1.8rem; font-weight: 800; }
