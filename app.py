@@ -61,21 +61,25 @@ GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": "ANY", "lon": "ANY"}}
 
 USERS = {
+    # RESPIRATORY
     "1001": {"name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": "+16175551234"},
     "1002": {"name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": None},
     "1003": {"name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "phone": None},
     "1004": {"name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "phone": None},
     "1005": {"name": "Dr. Alan Grant", "role": "Director", "dept": "Respiratory", "level": "Director", "rate": 0.00, "phone": None},
+    # NURSING
     "2001": {"name": "Emma Watson", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2002": {"name": "John Doe", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2003": {"name": "Alice Smith", "role": "Charge RN", "dept": "Nursing", "level": "Supervisor", "rate": 80.00, "phone": None},
     "2004": {"name": "Robert Brown", "role": "Manager", "dept": "Nursing", "level": "Manager", "rate": 0.00, "phone": None},
     "2005": {"name": "Dr. Sattler", "role": "Director", "dept": "Nursing", "level": "Director", "rate": 0.00, "phone": None},
+    # PCA
     "3001": {"name": "Mia Wong", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3002": {"name": "Carlos Ruiz", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3003": {"name": "James Lee", "role": "Lead PCA", "dept": "PCA", "level": "Supervisor", "rate": 40.00, "phone": None},
     "3004": {"name": "Linda Davis", "role": "Manager", "dept": "PCA", "level": "Manager", "rate": 0.00, "phone": None},
     "3005": {"name": "Dr. Malcolm", "role": "Director", "dept": "PCA", "level": "Director", "rate": 0.00, "phone": None},
+    # ADMIN
     "9999": {"name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "phone": None}
 }
 
@@ -271,7 +275,7 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
 elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
     st.markdown(f"## 📅 System Schedule")
     
-   # MANAGER/DIRECTOR ASSIGNMENT TOOL
+    # MANAGER/DIRECTOR ASSIGNMENT TOOL
     if user['level'] in ["Manager", "Director", "Admin"]:
         with st.expander("🛠️ ASSIGN TEAM SHIFTS"):
             with st.form("assign_sched"):
@@ -283,21 +287,22 @@ elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
                 
                 if st.form_submit_button("Publish to Schedule"):
                     target_dept = USERS[target_pin]['dept']
-                    # FIX: Pointing back to 'schedules' (plural) and adding a strict error catcher
                     db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
                                     {"id": f"SCH-{int(time.time())}", "p": str(target_pin), "d": str(s_date), "t": str(s_time), "dept": str(target_dept)})
                     if db_success: 
                         st.success(f"✅ Shift assigned to {available_staff[target_pin]}")
                     else: 
-                        st.error("❌ Database Error: Could not save. Please verify your Supabase table is named exactly 'schedules'.")
+                        st.error("❌ Database Error: Could not save to 'schedules' table.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
     
-    # DB FETCH: Force singular 'schedule' table
+    # DB FETCH
     if user['level'] == "Admin":
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule ORDER BY shift_date ASC, shift_time ASC")
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules ORDER BY shift_date ASC, shift_time ASC")
     elif user['level'] in ["Manager", "Director"]:
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
     else:
-        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedules WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
     
     if scheds:
         grouped_shifts = defaultdict(list)
