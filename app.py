@@ -61,25 +61,21 @@ GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": "ANY", "lon": "ANY"}}
 
 USERS = {
-    # RESPIRATORY
     "1001": {"name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": "+16175551234"},
     "1002": {"name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 85.00, "phone": None},
     "1003": {"name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "phone": None},
     "1004": {"name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "phone": None},
     "1005": {"name": "Dr. Alan Grant", "role": "Director", "dept": "Respiratory", "level": "Director", "rate": 0.00, "phone": None},
-    # NURSING
     "2001": {"name": "Emma Watson", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2002": {"name": "John Doe", "role": "RN", "dept": "Nursing", "level": "Worker", "rate": 75.00, "phone": None},
     "2003": {"name": "Alice Smith", "role": "Charge RN", "dept": "Nursing", "level": "Supervisor", "rate": 80.00, "phone": None},
     "2004": {"name": "Robert Brown", "role": "Manager", "dept": "Nursing", "level": "Manager", "rate": 0.00, "phone": None},
     "2005": {"name": "Dr. Sattler", "role": "Director", "dept": "Nursing", "level": "Director", "rate": 0.00, "phone": None},
-    # PCA
     "3001": {"name": "Mia Wong", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3002": {"name": "Carlos Ruiz", "role": "PCA", "dept": "PCA", "level": "Worker", "rate": 35.00, "phone": None},
     "3003": {"name": "James Lee", "role": "Lead PCA", "dept": "PCA", "level": "Supervisor", "rate": 40.00, "phone": None},
     "3004": {"name": "Linda Davis", "role": "Manager", "dept": "PCA", "level": "Manager", "rate": 0.00, "phone": None},
     "3005": {"name": "Dr. Malcolm", "role": "Director", "dept": "PCA", "level": "Director", "rate": 0.00, "phone": None},
-    # ADMIN
     "9999": {"name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "phone": None}
 }
 
@@ -260,4 +256,85 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
 
     with tab2:
         with st.form("new_shift"):
-            shift
+            shift_loc = st.selectbox("Facility", list(HOSPITALS.keys()))
+            d = st.date_input("Date")
+            c1, c2 = st.columns(2)
+            s_time = c1.time_input("Start")
+            e_time = c2.time_input("End")
+            if st.form_submit_button("PUBLISH TO MARKET"):
+                s_id = f"SHIFT-{int(time.time())}"
+                r_loc = f"{user['role']} ({user['dept']}) @ {shift_loc}"
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
+                                {"id": s_id, "p": pin, "r": r_loc, "d": d, "s": str(s_time), "e": str(e_time), "rt": user['rate']})
+                st.success("Shift Published!")
+
+elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
+    st.markdown(f"## 📅 System Schedule")
+    
+    # MANAGER/DIRECTOR ASSIGNMENT TOOL
+    if user['level'] in ["Manager", "Director", "Admin"]:
+        with st.expander("🛠️ ASSIGN TEAM SHIFTS"):
+            with st.form("assign_sched"):
+                available_staff = {p: u['name'] for p, u in USERS.items() if (u['dept'] == user['dept'] or user['dept'] == "All") and u['level'] in ["Worker", "Supervisor"]}
+                target_pin = st.selectbox("Select Staff Member", options=list(available_staff.keys()), format_func=lambda x: available_staff[x])
+                
+                s_date = st.date_input("Shift Date")
+                s_time = st.text_input("Shift Time (e.g., 0700-1900)")
+                
+                if st.form_submit_button("Publish to Schedule"):
+                    target_dept = USERS[target_pin]['dept']
+                    # FIX: Saving to singular 'schedule' table to match Supabase
+                    db_success = run_transaction("INSERT INTO schedule (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
+                                    {"id": f"SCH-{int(time.time())}", "p": str(target_pin), "d": str(s_date), "t": str(s_time), "dept": str(target_dept)})
+                    if db_success: st.success(f"✅ Shift assigned to {available_staff[target_pin]}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # DB FETCH: Force singular 'schedule' table
+    if user['level'] == "Admin":
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule ORDER BY shift_date ASC, shift_time ASC")
+    elif user['level'] in ["Manager", "Director"]:
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
+    else:
+        scheds = run_query("SELECT pin, shift_date, shift_time, department FROM schedule WHERE department=:d ORDER BY shift_date ASC, shift_time ASC", {"d": user['dept']})
+    
+    if scheds:
+        grouped_shifts = defaultdict(list)
+        for s in scheds:
+            grouped_shifts[s[1]].append(s) 
+            
+        for date in sorted(grouped_shifts.keys()):
+            shifts = grouped_shifts[date]
+            try:
+                dt_obj = datetime.strptime(date, "%Y-%m-%d")
+                formatted_date = dt_obj.strftime("%A, %B %d, %Y")
+            except:
+                formatted_date = date
+
+            st.markdown(f"<div class='sched-date-header'>🗓️ {formatted_date}</div>", unsafe_allow_html=True)
+            
+            for shift in shifts:
+                owner_pin = str(shift[0])
+                owner_name = USERS.get(owner_pin, {}).get('name', f"Unknown User ({owner_pin})")
+                owner_role = USERS.get(owner_pin, {}).get('role', "")
+                time_block = shift[2]
+                
+                personal_indicator = "⭐ " if owner_pin == pin else ""
+                
+                st.markdown(f"""
+                <div class='sched-row'>
+                    <div class='sched-time'>{time_block}</div>
+                    <div style='flex-grow: 1; text-align: left; padding-left: 15px;'>
+                        <span class='sched-name'>{personal_indicator}{owner_name}</span> 
+                        <span class='sched-role'>| {owner_role}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+    else: 
+        st.info("No shifts are currently scheduled.")
+
+elif "LOGS" in nav:
+    st.markdown("## 📂 System Records")
+    if user['level'] == "Admin": q = "SELECT pin, action, timestamp, amount, note FROM history ORDER BY timestamp DESC LIMIT 50"; res = run_query(q)
+    else: q = "SELECT pin, action, timestamp, amount, note FROM history WHERE pin=:p ORDER BY timestamp DESC"; res = run_query(q, {"p": pin})
+    if res: st.dataframe(pd.DataFrame(res, columns=["User PIN", "Action", "Time", "Amount", "Note"]), use_container_width=True)
