@@ -271,7 +271,7 @@ elif nav in ["MARKETPLACE", "DEPT MARKETPLACE"]:
 elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
     st.markdown(f"## 📅 System Schedule")
     
-    # MANAGER/DIRECTOR ASSIGNMENT TOOL
+   # MANAGER/DIRECTOR ASSIGNMENT TOOL
     if user['level'] in ["Manager", "Director", "Admin"]:
         with st.expander("🛠️ ASSIGN TEAM SHIFTS"):
             with st.form("assign_sched"):
@@ -283,12 +283,13 @@ elif nav in ["MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE"]:
                 
                 if st.form_submit_button("Publish to Schedule"):
                     target_dept = USERS[target_pin]['dept']
-                    # FIX: Saving to singular 'schedule' table to match Supabase
-                    db_success = run_transaction("INSERT INTO schedule (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
+                    # FIX: Pointing back to 'schedules' (plural) and adding a strict error catcher
+                    db_success = run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department) VALUES (:id, :p, :d, :t, :dept)",
                                     {"id": f"SCH-{int(time.time())}", "p": str(target_pin), "d": str(s_date), "t": str(s_time), "dept": str(target_dept)})
-                    if db_success: st.success(f"✅ Shift assigned to {available_staff[target_pin]}")
-
-    st.markdown("<br>", unsafe_allow_html=True)
+                    if db_success: 
+                        st.success(f"✅ Shift assigned to {available_staff[target_pin]}")
+                    else: 
+                        st.error("❌ Database Error: Could not save. Please verify your Supabase table is named exactly 'schedules'.")
     
     # DB FETCH: Force singular 'schedule' table
     if user['level'] == "Admin":
