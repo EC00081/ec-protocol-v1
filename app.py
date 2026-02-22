@@ -209,14 +209,13 @@ if nav == "COMMAND CENTER" and pin == "9999":
     else: st.info("No operators currently active.")
 
 elif nav == "DASHBOARD":
-    st.markdown(f"<h1 style='font-weight: 800;'>Good Morning, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
-    active = st.session_state.user_state['active']
-    if active: hrs = (time.time() - st.session_state.user_state['start_time']) / 3600; st.session_state.user_state['earnings'] = hrs * user['rate']
-    gross = st.session_state.user_state['earnings']; net = gross * (1 - sum(TAX_RATES.values()))
+    # Dynamic Time-of-Day Greeting
+    current_hour = datetime.now(LOCAL_TZ).hour
+    if current_hour < 12: greeting = "Good Morning"
+    elif current_hour < 17: greeting = "Good Afternoon"
+    else: greeting = "Good Evening"
     
-    c1, c2 = st.columns(2)
-    c1.metric("CURRENT EARNINGS", f"${gross:,.2f}"); c2.metric("NET PAYOUT", f"${net:,.2f}")
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)e_allow_html=True)
 
     if active:
         if st.button("🔴 END SHIFT"):
