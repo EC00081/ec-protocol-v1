@@ -216,6 +216,18 @@ elif nav == "DASHBOARD":
     else: greeting = "Good Evening"
     
     st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
+    
+    # THE MISSING LINE: This restores the app's ability to check your clock-in status
+    active = st.session_state.user_state['active']
+    
+    if active: hrs = (time.time() - st.session_state.user_state['start_time']) / 3600; st.session_state.user_state['earnings'] = hrs * user['rate']
+    # Dynamic Time-of-Day Greeting
+    current_hour = datetime.now(LOCAL_TZ).hour
+    if current_hour < 12: greeting = "Good Morning"
+    elif current_hour < 17: greeting = "Good Afternoon"
+    else: greeting = "Good Evening"
+    
+    st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
     if active:
         if st.button("🔴 END SHIFT"):
             if update_status(pin, "Inactive", 0, 0):
