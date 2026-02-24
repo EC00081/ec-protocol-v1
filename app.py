@@ -60,7 +60,6 @@ LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
 
-# UPDATED USERS: Liam's rate increased, Charles Morgan added
 USERS = {
     "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False},
     "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False},
@@ -137,12 +136,12 @@ def get_period_gross(pin, start_date, end_date):
     if res: return sum([float(r[0]) for r in res if r[0] is not None])
     return 0.0
 
-# --- 5. PDF PAY STUB GENERATOR (FIXED) ---
+# --- 5. PDF PAY STUB GENERATOR ---
 if PDF_ACTIVE:
     class PayStubPDF(FPDF):
         def header(self):
             self.set_font('Arial', 'B', 16)
-            self.set_text_color(59, 130, 246) # Brand Blue
+            self.set_text_color(59, 130, 246)
             self.cell(0, 10, 'EC Protocol Enterprise Health', 0, 1, 'L')
             self.set_font('Arial', '', 10)
             self.set_text_color(100, 116, 139)
@@ -176,7 +175,6 @@ if PDF_ACTIVE:
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        # 1. Employee & Pay Period Info
         pdf.set_font('Arial', 'B', 12)
         pdf.cell(100, 10, f"EMPLOYEE: {user_data['name'].upper()}", 0, 0)
         pdf.set_font('Arial', '', 10)
@@ -185,7 +183,6 @@ if PDF_ACTIVE:
         pdf.cell(90, 5, f"Check Date: {date.today().strftime('%m/%d/%Y')}", 0, 1, 'R')
         pdf.ln(10)
 
-        # 2. Earnings Section
         pdf.section_title("EARNINGS")
         pdf.set_font('Arial', 'B', 9)
         pdf.set_text_color(100, 116, 139)
@@ -202,7 +199,6 @@ if PDF_ACTIVE:
         pdf.table_row("GROSS PAY", "", "", f"${period_gross:,.2f}", "", f"${ytd_gross:,.2f}", bold=True)
         pdf.ln(8)
 
-        # 3. Taxes & Deductions Section
         pdf.section_title("TAXES & WITHHOLDINGS")
         pdf.set_font('Arial', 'B', 9)
         pdf.set_text_color(100, 116, 139)
@@ -223,7 +219,6 @@ if PDF_ACTIVE:
         pdf.tax_row("TOTAL TAXES", f"${total_period_tax:,.2f}", f"${total_ytd_tax:,.2f}", bold=True)
         pdf.ln(10)
 
-        # 4. Summary & Net Pay
         net_pay = period_gross - total_period_tax
         pdf.set_fill_color(241, 245, 249)
         pdf.rect(10, pdf.get_y(), 190, 35, 'F')
@@ -241,14 +236,12 @@ if PDF_ACTIVE:
         pdf.set_text_color(16, 185, 129)
         pdf.cell(63, 10, f"${net_pay:,.2f}", 0, 1, 'C')
         
-        # Placeholder for Distribution & PTO to match visual styling
         pdf.set_y(pdf.get_y() + 10)
         pdf.set_text_color(100, 116, 139)
         pdf.set_font('Arial', '', 8)
         pdf.cell(95, 5, "DISTRIBUTION: Direct Deposit - Bank of America (XXXX-5591)", 0, 0, 'L')
         pdf.cell(95, 5, "PTO BALANCE: 124.50 Hrs Available", 0, 1, 'R')
 
-        # FIXED: Removed .encode('latin-1') because pdf.output(dest='S') already returns bytes in FPDF2
         return bytes(pdf.output(dest='S'))
 
 # --- 6. AUTH SCREEN ---
@@ -375,7 +368,6 @@ elif nav == "MY PROFILE":
     st.markdown("## 🪪 Credentials & Licenses")
     st.caption("Maintain active compliance to access the Marketplace.")
 
-    # EDIT MODE
     if st.session_state.edit_cred:
         st.markdown("### ✏️ Edit Credential")
         c_id = st.session_state.edit_cred
@@ -390,7 +382,6 @@ elif nav == "MY PROFILE":
                     st.success("✅ Credential Updated"); st.session_state.edit_cred = None; time.sleep(1); st.rerun()
             if st.button("Cancel Edit"): st.session_state.edit_cred = None; st.rerun()
     else:
-        # ADD MODE
         with st.expander("➕ ADD NEW CREDENTIAL"):
             with st.form("cred_form"):
                 doc_type = st.selectbox("Document Type", ["State RN License", "State RRT License", "BLS Certification", "ACLS Certification", "PALS Certification"])
@@ -452,37 +443,35 @@ elif nav == "TIMESHEETS":
                 st.markdown(f"""<div class='log-card' style='border-left: 4px solid #10b981 !important; background: rgba(16, 185, 129, 0.05) !important;'><div style='display: flex; justify-content: space-between; align-items: center;'><strong style='color: #10b981; font-size: 1.1rem;'>INSTANT TRANSFER</strong><span style='color: #f8fafc; font-weight: 800; font-size: 1.2rem;'>${amt:,.2f}</span></div><div style='color: #94a3b8; margin-top: 5px; font-size: 0.85rem;'>Processed: {ts}</div><div style='color: #e2e8f0; font-size: 0.85rem;'>Status: {note}</div></div>""", unsafe_allow_html=True)
         else: st.info("No payout history recorded.")
 
-  with tab3:
+    with tab3:
         st.markdown("### Generate Pay Stub")
         st.caption("Select a pay period to generate an official PDF statement.")
         
-        # 1. THE FORM: Just collects the dates and triggers the action
         with st.form("pay_stub_form"):
             c1, c2 = st.columns(2)
             start_d = c1.date_input("Start Date", value=date.today() - timedelta(days=14))
             end_d = c2.date_input("End Date", value=date.today())
             submitted = st.form_submit_button("Generate PDF Statement")
             
-        # 2. THE ACTION: Must be OUTSIDE the form block
         if submitted and PDF_ACTIVE:
             period_gross = get_period_gross(pin, start_d, end_d)
             ytd_gross = get_ytd_gross(pin)
-            
             if period_gross > 0:
-                pdf_data = generate_pay_stub(user, start_d, end_d, period_gross, ytd_gross)
+                st.session_state.pdf_data = generate_pay_stub(user, start_d, end_d, period_gross, ytd_gross)
+                st.session_state.pdf_filename = f"PayStub_{pin}_{end_d}.pdf"
                 st.success("✅ Pay Stub Generated Successfully!")
-                st.download_button(
-                    label="📄 Download PDF Pay Stub", 
-                    data=pdf_data, 
-                    file_name=f"PayStub_{pin}_{end_d}.pdf", 
-                    mime="application/pdf"
-                )
             else: 
                 st.warning("No earnings found for this selected period.")
         elif submitted and not PDF_ACTIVE: 
             st.error("PDF generation library (fpdf) is not active.")
 
+        if 'pdf_data' in st.session_state:
+            st.download_button(
+                label="📄 Download PDF Pay Stub", 
+                data=st.session_state.pdf_data, 
+                file_name=st.session_state.pdf_filename, 
+                mime="application/pdf"
+            )
+
 elif nav in ["MARKETPLACE", "DEPT MARKETPLACE", "MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE", "COMMAND CENTER", "AUDIT LOGS"]:
-     # Placeholder for tabs not currently under active development in this iteration.
-     # The full backend logic for these modules is preserved and ready for the next phase.
     st.info(f"{nav} module is active. Please utilize the Dashboard, Profile, or Timesheets tabs for current features.")
