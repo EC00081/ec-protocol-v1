@@ -195,7 +195,6 @@ with st.sidebar:
     st.caption(f"{user['role']} | {user['dept']}")
     st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
     
-    # Dynamic Menus based on hierarchy
     if user['level'] == "Admin": 
         menu_items = ["COMMAND CENTER", "MASTER SCHEDULE", "APPROVALS"]
     elif user['level'] in ["Manager", "Director"]: 
@@ -266,28 +265,21 @@ if nav == "DASHBOARD":
                         log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
                 else: st.error("❌ Incorrect PIN.")
 
-# [CENSUS & ACUITY] (Middle Management Only)
+# [CENSUS & ACUITY + SOS PROTOCOL]
 elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     st.caption("Live acuity tracking and safe staffing calculations.")
     
-    # 1. Fetch Current Census Data
     c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM census WHERE dept=:d", {"d": user['dept']})
     curr_pts = c_data[0][0] if c_data else 0
     curr_high = c_data[0][1] if c_data else 0
     last_upd = c_data[0][2].strftime("%I:%M %p") if c_data and c_data[0][2] else "Never"
 
-    # 2. Staffing Math (1:3 High Acuity, 1:6 Standard)
     standard_pts = max(0, curr_pts - curr_high)
     req_staff_high = math.ceil(curr_high / 3)
     req_staff_std = math.ceil(standard_pts / 6)
     total_req_staff = req_staff_high + req_staff_std
 
-    # 3. Fetch Actual Active Staff from DB
-    a_staff_query = run_query("SELECT COUNT(*) FROM workers w JOIN (SELECT key, value FROM json_each(:j)) u ON w.pin = u.key WHERE w.status='Active' AND u.value LIKE :dept_match", 
-                              {"j": str({k: v['dept'] for k, v in USERS.items()}).replace("'", '"'), "dept_match": f"%{user['dept']}%"})
-    
-    # Simpler fallback if json query fails on SQLite/Supabase differences
     actual_staff = 0
     active_rows = run_query("SELECT pin FROM workers WHERE status='Active'")
     if active_rows:
@@ -296,7 +288,6 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
 
     variance = actual_staff - total_req_staff
     
-    # Display Metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Patients", curr_pts, f"{curr_high} High Acuity", delta_color="off")
     col2.metric("Required Staff (Calculated)", total_req_staff)
@@ -304,13 +295,32 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
     if variance < 0:
         col3.metric("Current Staff (Live)", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
         st.error(f"🚨 UNSAFE STAFFING DETECTED: {user['dept']} requires {abs(variance)} more active personnel to meet safe care ratios.")
+        
+        # --- THE SOS BROADCAST ENGINE ---
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
+            missing_count = abs(variance)
+            incentive_rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00 # 1.5x Pay
+            
+            for i in range(missing_count):
+                s_id = f"SOS-{int(time.time()*1000)}-{i}"
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
+                                {"id": s_id, "p": pin, "r": f"🚨 SOS URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": incentive_rate})
+            
+            msg_id = f"MSG-SOS-{int(time.time()*1000)}"
+            sos_msg = f"🚨 SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
+            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", 
+                            {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
+            
+            st.success("🚨 SOS Broadcasted! Shifts pushed to Marketplace and alert sent to Team Chat.")
+            time.sleep(2)
+            st.rerun()
+
     else:
         col3.metric("Current Staff (Live)", actual_staff, f"+{variance} (Safe)", delta_color="normal")
         st.success(f"✅ Safe Staffing Maintained: Ratios are currently optimal.")
 
     st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
-    
-    # Update Form
     with st.expander("📝 UPDATE CENSUS NUMBERS", expanded=False):
         with st.form("update_census"):
             st.caption(f"Last Updated: {last_upd}")
@@ -318,8 +328,7 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
             new_h = st.number_input("High Acuity (Vents/ICU Stepdown)", min_value=0, value=curr_high, step=1)
             
             if st.form_submit_button("Lock In Census"):
-                if new_h > new_t:
-                    st.error("High acuity cannot exceed total patients.")
+                if new_h > new_t: st.error("High acuity cannot exceed total patients.")
                 else:
                     run_transaction("INSERT INTO census (dept, total_pts, high_acuity, last_updated) VALUES (:d, :t, :h, NOW()) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h})
                     st.success("Census Updated!"); time.sleep(1); st.rerun()
@@ -329,7 +338,6 @@ elif nav == "TEAM CHAT":
     st.markdown(f"## 💬 {user['dept']} Secure Comms")
     st.caption(f"End-to-end encrypted internal broadcast network for {user['dept']} personnel.")
     
-    # Chat Input
     with st.form("chat_input", clear_on_submit=True):
         col_msg, col_btn = st.columns([5, 1])
         msg = col_msg.text_input("Type your message...", label_visibility="collapsed")
@@ -340,7 +348,6 @@ elif nav == "TEAM CHAT":
             
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Chat History
     chat_logs = run_query("SELECT pin, content, timestamp FROM messages WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": user['dept']})
     if chat_logs:
         for log in chat_logs:
@@ -350,6 +357,8 @@ elif nav == "TEAM CHAT":
             
             if sender_pin == pin:
                 st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-me'><strong>You</strong> <span style='color:#94a3b8; font-size:0.75rem;'>{t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+            elif sender_pin == "9999": # System Broadcast
+                 st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble' style='background:rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.4); margin-right: auto; border-bottom-left-radius: 4px;'><strong style='color:#ef4444;'>SYSTEM ALERT</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| Automated • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
             else:
                 sender_name = USERS.get(sender_pin, {}).get("name", f"User {sender_pin}")
                 sender_role = USERS.get(sender_pin, {}).get("role", "")
@@ -391,7 +400,6 @@ elif nav == "THE BANK":
         if res:
             for r in res:
                 ts, amt, note = r[0], float(r[1]), r[2]
-                # UI TWEAK EXECUTED: Green money, Blue hours worked!
                 st.markdown(f"""<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #10b981 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #10b981; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | <span style='color: #3b82f6; font-weight:800;'>{note}</span></div></div>""", unsafe_allow_html=True)
         else: st.info("No shifts worked yet.")
 
@@ -514,7 +522,8 @@ elif nav == "MARKETPLACE":
         if res:
             for s in res:
                 poster = USERS.get(str(s[1]), {}).get("name", "Unknown")
-                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><div style='font-weight:bold; font-size:1.1rem;'>{s[3]} | {s[2]}</div><div style='color:#34d399; font-weight:700;'>{s[4]} - {s[5]} @ ${s[6]}/hr</div><div style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Posted by: {poster}</div></div>", unsafe_allow_html=True)
+                border_color = "#ef4444" if "SOS" in s[2] else "#3b82f6"
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid {border_color} !important;'><div style='font-weight:bold; font-size:1.1rem;'>{s[3]} | {s[2]}</div><div style='color:#34d399; font-weight:700;'>{s[4]} - {s[5]} @ ${s[6]}/hr</div><div style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Posted by: {poster}</div></div>", unsafe_allow_html=True)
                 if user['level'] in ["Worker", "Supervisor"] and str(s[1]) != pin:
                     if st.button("CLAIM SHIFT", key=s[0]):
                         run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"p": pin, "id": s[0]})
