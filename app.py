@@ -137,7 +137,7 @@ def get_period_gross(pin, start_date, end_date):
     if res: return sum([float(r[0]) for r in res if r[0] is not None])
     return 0.0
 
-# --- 5. PDF PAY STUB GENERATOR ---
+# --- 5. PDF PAY STUB GENERATOR (FIXED) ---
 if PDF_ACTIVE:
     class PayStubPDF(FPDF):
         def header(self):
@@ -248,7 +248,8 @@ if PDF_ACTIVE:
         pdf.cell(95, 5, "DISTRIBUTION: Direct Deposit - Bank of America (XXXX-5591)", 0, 0, 'L')
         pdf.cell(95, 5, "PTO BALANCE: 124.50 Hrs Available", 0, 1, 'R')
 
-        return pdf.output(dest='S').encode('latin-1')
+        # FIXED: Removed .encode('latin-1') because pdf.output(dest='S') already returns bytes in FPDF2
+        return bytes(pdf.output(dest='S'))
 
 # --- 6. AUTH SCREEN ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0, 'payout_lock': False}
