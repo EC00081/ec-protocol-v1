@@ -60,7 +60,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 3. DATABASE ENGINE & AUTO-MIGRATION ---
+# --- 3. DATABASE ENGINE & FORTIFIED AUTO-MIGRATION ---
 @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
@@ -72,6 +72,9 @@ def get_db_engine():
     try:
         engine = create_engine(url)
         with engine.connect() as conn:
+            # Force-create every table to ensure no silent failures
+            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
@@ -189,6 +192,14 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
+# --- Check For Recent Messages (Notification Bubble) ---
+chat_label = "COMMS & CHAT"
+try:
+    recent_msg = run_query("SELECT count(*) FROM messages WHERE timestamp >= NOW() - INTERVAL '12 hours'")
+    if recent_msg and recent_msg[0][0] > 0:
+        chat_label = "COMMS & CHAT 🔴"
+except: pass
+
 # --- 7. NAVIGATION BUILDER ---
 with st.sidebar:
     st.markdown(f"<h3 style='color: #38bdf8; margin-bottom: 0;'>{user['name'].upper()}</h3>", unsafe_allow_html=True)
@@ -198,16 +209,19 @@ with st.sidebar:
     if user['level'] == "Admin": 
         menu_items = ["COMMAND CENTER", "MASTER SCHEDULE", "APPROVALS"]
     elif user['level'] in ["Manager", "Director"]: 
-        menu_items = ["DASHBOARD", "CENSUS & ACUITY", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
+        menu_items = ["DASHBOARD", "CENSUS & ACUITY", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
     elif user['level'] == "Supervisor":
-        menu_items = ["DASHBOARD", "CENSUS & ACUITY", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+        menu_items = ["DASHBOARD", "CENSUS & ACUITY", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
     else: 
-        menu_items = ["DASHBOARD", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+        menu_items = ["DASHBOARD", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
         
     nav = st.radio("MENU", menu_items)
         
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
+
+# Extract true navigation intent if bubble is attached
+if "COMMS & CHAT" in nav: nav = "COMMS & CHAT"
 
 # --- 8. ROUTING ---
 
@@ -296,11 +310,10 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
         col3.metric("Current Staff (Live)", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
         st.error(f"🚨 UNSAFE STAFFING DETECTED: {user['dept']} requires {abs(variance)} more active personnel to meet safe care ratios.")
         
-        # --- THE SOS BROADCAST ENGINE ---
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
             missing_count = abs(variance)
-            incentive_rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00 # 1.5x Pay
+            incentive_rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
             
             for i in range(missing_count):
                 s_id = f"SOS-{int(time.time()*1000)}-{i}"
@@ -308,14 +321,14 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
                                 {"id": s_id, "p": pin, "r": f"🚨 SOS URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": incentive_rate})
             
             msg_id = f"MSG-SOS-{int(time.time()*1000)}"
-            sos_msg = f"🚨 SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
-            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", 
-                            {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
+            sos_msg = f"SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
+            
+            # Post to both Global and Dept channels
+            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
+            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": f"[{user['dept'].upper()}] {sos_msg}"}) 
             
             st.success("🚨 SOS Broadcasted! Shifts pushed to Marketplace and alert sent to Team Chat.")
-            time.sleep(2)
-            st.rerun()
-
+            time.sleep(2); st.rerun()
     else:
         col3.metric("Current Staff (Live)", actual_staff, f"+{variance} (Safe)", delta_color="normal")
         st.success(f"✅ Safe Staffing Maintained: Ratios are currently optimal.")
@@ -330,41 +343,50 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
             if st.form_submit_button("Lock In Census"):
                 if new_h > new_t: st.error("High acuity cannot exceed total patients.")
                 else:
-                    run_transaction("INSERT INTO census (dept, total_pts, high_acuity, last_updated) VALUES (:d, :t, :h, NOW()) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h})
+                    # THE FIX: Using PostgreSQL EXCLUDED to safely overwrite existing data
+                    sql = """INSERT INTO census (dept, total_pts, high_acuity, last_updated) VALUES (:d, :t, :h, NOW()) 
+                             ON CONFLICT (dept) DO UPDATE SET total_pts = EXCLUDED.total_pts, high_acuity = EXCLUDED.high_acuity, last_updated = NOW()"""
+                    run_transaction(sql, {"d": user['dept'], "t": new_t, "h": new_h})
                     st.success("Census Updated!"); time.sleep(1); st.rerun()
 
-# [SECURE COMMS / TEAM CHAT]
-elif nav == "TEAM CHAT":
-    st.markdown(f"## 💬 {user['dept']} Secure Comms")
-    st.caption(f"End-to-end encrypted internal broadcast network for {user['dept']} personnel.")
+# [COMMS & CHAT - Multi-Channel]
+elif nav == "COMMS & CHAT":
+    st.markdown("## 💬 Secure Comms Network")
+    st.caption("End-to-end encrypted internal broadcast network.")
     
-    with st.form("chat_input", clear_on_submit=True):
-        col_msg, col_btn = st.columns([5, 1])
-        msg = col_msg.text_input("Type your message...", label_visibility="collapsed")
-        if col_btn.form_submit_button("SEND") and msg.strip():
-            msg_id = f"MSG-{int(time.time()*1000)}"
-            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": pin, "d": user['dept'], "c": msg})
-            st.rerun()
-            
-    st.markdown("<br>", unsafe_allow_html=True)
+    tab_global, tab_dept = st.tabs(["🌍 GLOBAL HOSPITAL", f"🏥 {user['dept'].upper()} TEAM"])
     
-    chat_logs = run_query("SELECT pin, content, timestamp FROM messages WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": user['dept']})
-    if chat_logs:
-        for log in chat_logs:
-            sender_pin = str(log[0])
-            content = log[1]
-            t_stamp = log[2].strftime("%I:%M %p") if isinstance(log[2], datetime) else log[2]
-            
-            if sender_pin == pin:
-                st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-me'><strong>You</strong> <span style='color:#94a3b8; font-size:0.75rem;'>{t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
-            elif sender_pin == "9999": # System Broadcast
-                 st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble' style='background:rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.4); margin-right: auto; border-bottom-left-radius: 4px;'><strong style='color:#ef4444;'>SYSTEM ALERT</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| Automated • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
-            else:
-                sender_name = USERS.get(sender_pin, {}).get("name", f"User {sender_pin}")
-                sender_role = USERS.get(sender_pin, {}).get("role", "")
-                st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-them'><strong style='color:#38bdf8;'>{sender_name}</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| {sender_role} • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
-    else:
-        st.info("No messages in this channel yet. Send one above to start the comms.")
+    def render_chat(channel_name):
+        with st.form(f"chat_input_{channel_name}", clear_on_submit=True):
+            col_msg, col_btn = st.columns([5, 1])
+            msg = col_msg.text_input("Type your message...", label_visibility="collapsed")
+            if col_btn.form_submit_button("SEND") and msg.strip():
+                msg_id = f"MSG-{int(time.time()*1000)}"
+                run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": pin, "d": channel_name, "c": msg})
+                st.rerun()
+                
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        chat_logs = run_query("SELECT pin, content, timestamp FROM messages WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": channel_name})
+        if chat_logs:
+            for log in chat_logs:
+                sender_pin = str(log[0])
+                content = log[1]
+                t_stamp = log[2].strftime("%I:%M %p") if isinstance(log[2], datetime) else log[2]
+                
+                if sender_pin == pin:
+                    st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-me'><strong>You</strong> <span style='color:#94a3b8; font-size:0.75rem;'>{t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+                elif sender_pin == "9999": # System Broadcast
+                     st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble' style='background:rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.4); margin-right: auto; border-bottom-left-radius: 4px;'><strong style='color:#ef4444;'>SYSTEM ALERT</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| Automated • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+                else:
+                    sender_name = USERS.get(sender_pin, {}).get("name", f"User {sender_pin}")
+                    sender_role = USERS.get(sender_pin, {}).get("role", "")
+                    st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-them'><strong style='color:#38bdf8;'>{sender_name}</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| {sender_role} • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+        else:
+            st.info(f"No messages in the {channel_name} channel yet. Send one above to start the comms.")
+
+    with tab_global: render_chat("GLOBAL")
+    with tab_dept: render_chat(user['dept'])
 
 # [THE BANK]
 elif nav == "THE BANK":
