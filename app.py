@@ -452,23 +452,35 @@ elif nav == "TIMESHEETS":
                 st.markdown(f"""<div class='log-card' style='border-left: 4px solid #10b981 !important; background: rgba(16, 185, 129, 0.05) !important;'><div style='display: flex; justify-content: space-between; align-items: center;'><strong style='color: #10b981; font-size: 1.1rem;'>INSTANT TRANSFER</strong><span style='color: #f8fafc; font-weight: 800; font-size: 1.2rem;'>${amt:,.2f}</span></div><div style='color: #94a3b8; margin-top: 5px; font-size: 0.85rem;'>Processed: {ts}</div><div style='color: #e2e8f0; font-size: 0.85rem;'>Status: {note}</div></div>""", unsafe_allow_html=True)
         else: st.info("No payout history recorded.")
 
-    with tab3:
+  with tab3:
         st.markdown("### Generate Pay Stub")
         st.caption("Select a pay period to generate an official PDF statement.")
+        
+        # 1. THE FORM: Just collects the dates and triggers the action
         with st.form("pay_stub_form"):
             c1, c2 = st.columns(2)
             start_d = c1.date_input("Start Date", value=date.today() - timedelta(days=14))
             end_d = c2.date_input("End Date", value=date.today())
             submitted = st.form_submit_button("Generate PDF Statement")
-            if submitted and PDF_ACTIVE:
-                period_gross = get_period_gross(pin, start_d, end_d)
-                ytd_gross = get_ytd_gross(pin)
-                if period_gross > 0:
-                    pdf_data = generate_pay_stub(user, start_d, end_d, period_gross, ytd_gross)
-                    st.success("✅ Pay Stub Generated Successfully!")
-                    st.download_button(label="📄 Download PDF Pay Stub", data=pdf_data, file_name=f"PayStub_{pin}_{end_d}.pdf", mime="application/pdf")
-                else: st.warning("No earnings found for this select period.")
-            elif submitted and not PDF_ACTIVE: st.error("PDF generation library (fpdf) is not active.")
+            
+        # 2. THE ACTION: Must be OUTSIDE the form block
+        if submitted and PDF_ACTIVE:
+            period_gross = get_period_gross(pin, start_d, end_d)
+            ytd_gross = get_ytd_gross(pin)
+            
+            if period_gross > 0:
+                pdf_data = generate_pay_stub(user, start_d, end_d, period_gross, ytd_gross)
+                st.success("✅ Pay Stub Generated Successfully!")
+                st.download_button(
+                    label="📄 Download PDF Pay Stub", 
+                    data=pdf_data, 
+                    file_name=f"PayStub_{pin}_{end_d}.pdf", 
+                    mime="application/pdf"
+                )
+            else: 
+                st.warning("No earnings found for this selected period.")
+        elif submitted and not PDF_ACTIVE: 
+            st.error("PDF generation library (fpdf) is not active.")
 
 elif nav in ["MARKETPLACE", "DEPT MARKETPLACE", "MY SCHEDULE", "DEPT SCHEDULE", "MASTER SCHEDULE", "COMMAND CENTER", "AUDIT LOGS"]:
      # Placeholder for tabs not currently under active development in this iteration.
