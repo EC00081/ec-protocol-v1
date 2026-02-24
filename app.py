@@ -60,7 +60,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 3. DATABASE ENGINE & FORTIFIED AUTO-MIGRATION ---
+# --- 3. DATABASE ENGINE & NUCLEAR MIGRATION ---
 @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
@@ -72,33 +72,41 @@ def get_db_engine():
     try:
         engine = create_engine(url)
         with engine.connect() as conn:
-            # Force-create every table to ensure no silent failures
+            # Standard Tables
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
-            try: conn.execute(text("ALTER TABLE schedules ADD COLUMN status text DEFAULT 'SCHEDULED';"))
-            except: pass
+            # NUCLEAR FIX: Brand new names to bypass broken schemas
+            conn.execute(text("CREATE TABLE IF NOT EXISTS comms_log (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
             conn.commit()
         return engine
-    except: return None
+    except Exception as e: 
+        print(f"DB Connection Error: {e}")
+        return None
 
 def run_query(query, params=None):
     engine = get_db_engine()
     if not engine: return None
     try:
         with engine.connect() as conn: return conn.execute(text(query), params or {}).fetchall()
-    except: return None
+    except Exception as e: 
+        print(f"Query Error: {e}")
+        return None
 
 def run_transaction(query, params=None):
     engine = get_db_engine()
     if not engine: return False
     try:
-        with engine.connect() as conn: conn.execute(text(query), params or {}); conn.commit(); return True
-    except: return False
+        with engine.connect() as conn: 
+            conn.execute(text(query), params or {})
+            conn.commit()
+            return True
+    except Exception as e: 
+        print(f"Transaction Error: {e}")
+        return False
 
 # --- 4. CORE DB LOGIC & PAYROLL HELPERS ---
 def force_cloud_sync(pin):
@@ -195,7 +203,7 @@ pin = st.session_state.pin
 # --- Check For Recent Messages (Notification Bubble) ---
 chat_label = "COMMS & CHAT"
 try:
-    recent_msg = run_query("SELECT count(*) FROM messages WHERE timestamp >= NOW() - INTERVAL '12 hours'")
+    recent_msg = run_query("SELECT count(*) FROM comms_log WHERE timestamp >= NOW() - INTERVAL '12 hours'")
     if recent_msg and recent_msg[0][0] > 0:
         chat_label = "COMMS & CHAT 🔴"
 except: pass
@@ -220,7 +228,6 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
-# Extract true navigation intent if bubble is attached
 if "COMMS & CHAT" in nav: nav = "COMMS & CHAT"
 
 # --- 8. ROUTING ---
@@ -282,9 +289,12 @@ if nav == "DASHBOARD":
 # [CENSUS & ACUITY + SOS PROTOCOL]
 elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
-    st.caption("Live acuity tracking and safe staffing calculations.")
     
-    c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM census WHERE dept=:d", {"d": user['dept']})
+    # Live Staff Refresh button for multi-tab testing
+    if st.button("🔄 Refresh Live Database"):
+        st.rerun()
+        
+    c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM unit_census WHERE dept=:d", {"d": user['dept']})
     curr_pts = c_data[0][0] if c_data else 0
     curr_high = c_data[0][1] if c_data else 0
     last_upd = c_data[0][2].strftime("%I:%M %p") if c_data and c_data[0][2] else "Never"
@@ -317,17 +327,19 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
             
             for i in range(missing_count):
                 s_id = f"SOS-{int(time.time()*1000)}-{i}"
-                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
+                success_market = run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
                                 {"id": s_id, "p": pin, "r": f"🚨 SOS URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": incentive_rate})
             
             msg_id = f"MSG-SOS-{int(time.time()*1000)}"
             sos_msg = f"SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
             
-            # Post to both Global and Dept channels
-            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
-            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": f"[{user['dept'].upper()}] {sos_msg}"}) 
+            success_msg1 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
+            success_msg2 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": f"[{user['dept'].upper()}] {sos_msg}"}) 
             
-            st.success("🚨 SOS Broadcasted! Shifts pushed to Marketplace and alert sent to Team Chat.")
+            if success_market and success_msg1:
+                st.success("🚨 SOS Broadcasted! Shifts pushed to Marketplace and alert sent to Team Chat.")
+            else:
+                st.error("Error communicating with the database.")
             time.sleep(2); st.rerun()
     else:
         col3.metric("Current Staff (Live)", actual_staff, f"+{variance} (Safe)", delta_color="normal")
@@ -341,13 +353,20 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
             new_h = st.number_input("High Acuity (Vents/ICU Stepdown)", min_value=0, value=curr_high, step=1)
             
             if st.form_submit_button("Lock In Census"):
-                if new_h > new_t: st.error("High acuity cannot exceed total patients.")
+                if new_h > new_t: 
+                    st.error("High acuity cannot exceed total patients.")
                 else:
-                    # THE FIX: Using PostgreSQL EXCLUDED to safely overwrite existing data
-                    sql = """INSERT INTO census (dept, total_pts, high_acuity, last_updated) VALUES (:d, :t, :h, NOW()) 
-                             ON CONFLICT (dept) DO UPDATE SET total_pts = EXCLUDED.total_pts, high_acuity = EXCLUDED.high_acuity, last_updated = NOW()"""
-                    run_transaction(sql, {"d": user['dept'], "t": new_t, "h": new_h})
-                    st.success("Census Updated!"); time.sleep(1); st.rerun()
+                    # NUCLEAR FIX: Checks manually instead of relying on ON CONFLICT
+                    exists = run_query("SELECT 1 FROM unit_census WHERE dept=:d", {"d": user['dept']})
+                    if exists:
+                        success = run_transaction("UPDATE unit_census SET total_pts=:t, high_acuity=:h, last_updated=NOW() WHERE dept=:d", {"d": user['dept'], "t": new_t, "h": new_h})
+                    else:
+                        success = run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h)", {"d": user['dept'], "t": new_t, "h": new_h})
+                    
+                    if success:
+                        st.success("Census Updated!"); time.sleep(1); st.rerun()
+                    else:
+                        st.error("Database connection failed. Census not updated.")
 
 # [COMMS & CHAT - Multi-Channel]
 elif nav == "COMMS & CHAT":
@@ -362,12 +381,15 @@ elif nav == "COMMS & CHAT":
             msg = col_msg.text_input("Type your message...", label_visibility="collapsed")
             if col_btn.form_submit_button("SEND") and msg.strip():
                 msg_id = f"MSG-{int(time.time()*1000)}"
-                run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": pin, "d": channel_name, "c": msg})
-                st.rerun()
+                success = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": pin, "d": channel_name, "c": msg})
+                if not success:
+                    st.error("Failed to push message to server.")
+                else:
+                    st.rerun()
                 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        chat_logs = run_query("SELECT pin, content, timestamp FROM messages WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": channel_name})
+        chat_logs = run_query("SELECT pin, content, timestamp FROM comms_log WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": channel_name})
         if chat_logs:
             for log in chat_logs:
                 sender_pin = str(log[0])
