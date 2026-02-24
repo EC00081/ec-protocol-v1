@@ -215,8 +215,7 @@ elif nav == "DASHBOARD":
     elif current_hour < 17: greeting = "Good Afternoon"
     else: greeting = "Good Evening"
     
-    st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)e_allow_html=True)
-
+    st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
     if active:
         if st.button("🔴 END SHIFT"):
             if update_status(pin, "Inactive", 0, 0):
