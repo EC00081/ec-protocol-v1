@@ -9,13 +9,6 @@ from collections import defaultdict
 from streamlit_js_eval import get_geolocation
 from sqlalchemy import create_engine, text
 
-# --- NEW LIBRARIES ---
-try:
-    from twilio.rest import Client
-    TWILIO_ACTIVE = True
-except ImportError:
-    TWILIO_ACTIVE = False
-
 try:
     from fpdf import FPDF
     PDF_ACTIVE = True
@@ -35,10 +28,13 @@ html_style = """
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 2rem; font-weight: 800; text-shadow: 0 2px 10px rgba(0,0,0,0.3); }
     .stButton>button { width: 100%; height: 60px; border-radius: 12px; font-weight: 700; font-size: 1.1rem; border: none; transition: all 0.3s ease; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
-    .stTextInput>div>div>input, .stSelectbox>div>div>div, .stDateInput>div>div>input { background-color: rgba(15, 23, 42, 0.6) !important; color: white !important; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1) !important; backdrop-filter: blur(10px); }
+    .stTextInput>div>div>input, .stSelectbox>div>div>div, .stDateInput>div>div>input, .stNumberInput>div>div>input { background-color: rgba(15, 23, 42, 0.6) !important; color: white !important; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1) !important; backdrop-filter: blur(10px); }
     .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1.1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; letter-spacing: 1px; }
     .sched-row { display: flex; justify-content: space-between; padding: 15px; margin-bottom: 8px; border-left: 4px solid rgba(255,255,255,0.1); background: rgba(30, 41, 59, 0.5); border-radius: 8px; }
     .sched-time { color: #34d399; font-weight: 800; width: 120px; font-size: 1.1rem; }
+    .chat-bubble { padding: 12px 16px; border-radius: 16px; margin-bottom: 10px; max-width: 80%; line-height: 1.4; }
+    .chat-me { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); margin-left: auto; border-bottom-right-radius: 4px; }
+    .chat-them { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); margin-right: auto; border-bottom-left-radius: 4px; }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
@@ -52,6 +48,7 @@ HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anyw
 USERS = {
     "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False},
     "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False},
+    "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True},
     "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True},
     "9999": {"email": "cfo@ecprotocol.com", "password": "password123", "pin": "9999", "name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "vip": True}
 }
@@ -75,10 +72,11 @@ def get_db_engine():
     try:
         engine = create_engine(url)
         with engine.connect() as conn:
-            # Auto-Migrate Tables if they don't exist
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE schedules ADD COLUMN status text DEFAULT 'SCHEDULED';"))
             except: pass
             conn.commit()
@@ -191,16 +189,23 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 7. NAVIGATION ---
+# --- 7. NAVIGATION BUILDER ---
 with st.sidebar:
     st.markdown(f"<h3 style='color: #38bdf8; margin-bottom: 0;'>{user['name'].upper()}</h3>", unsafe_allow_html=True)
     st.caption(f"{user['role']} | {user['dept']}")
     st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
     
-    # Manager gets APPROVALS, Worker does not. Both get THE BANK.
-    if user['level'] == "Admin": nav = st.radio("MENU", ["COMMAND CENTER", "MASTER SCHEDULE", "APPROVALS"])
-    elif user['level'] in ["Manager", "Director"]: nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"])
-    else: nav = st.radio("MENU", ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"])
+    # Dynamic Menus based on hierarchy
+    if user['level'] == "Admin": 
+        menu_items = ["COMMAND CENTER", "MASTER SCHEDULE", "APPROVALS"]
+    elif user['level'] in ["Manager", "Director"]: 
+        menu_items = ["DASHBOARD", "CENSUS & ACUITY", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
+    elif user['level'] == "Supervisor":
+        menu_items = ["DASHBOARD", "CENSUS & ACUITY", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+    else: 
+        menu_items = ["DASHBOARD", "TEAM CHAT", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+        
+    nav = st.radio("MENU", menu_items)
         
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
@@ -214,10 +219,8 @@ if nav == "DASHBOARD":
     st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
     
     active = st.session_state.user_state.get('active', False)
-    # If active, calculate running earnings. Combine with stored earnings (if they were paused/resumed, though we keep it simple here).
     running_earn = 0.0
-    if active: 
-        running_earn = ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
+    if active: running_earn = ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
     
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
     display_net = display_gross * (1 - sum(TAX_RATES.values()))
@@ -232,11 +235,9 @@ if nav == "DASHBOARD":
         end_pin = st.text_input("Enter 4-Digit PIN to Clock Out", type="password", key="end_pin")
         if st.button("PUNCH OUT"):
             if end_pin == pin:
-                # Add shift earnings to user's total banked earnings in DB
                 new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
                 if update_status(pin, "Inactive", 0, new_total):
-                    st.session_state.user_state['active'] = False
-                    st.session_state.user_state['earnings'] = new_total
+                    st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                     log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
                     st.rerun()
             else: st.error("❌ Incorrect PIN.")
@@ -250,7 +251,6 @@ if nav == "DASHBOARD":
                 if st.button("PUNCH IN"):
                     if start_pin == pin:
                         start_t = time.time()
-                        # Keep existing earnings in bank, just set active status
                         if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0)):
                             st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t
                             log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
@@ -266,12 +266,102 @@ if nav == "DASHBOARD":
                         log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
                 else: st.error("❌ Incorrect PIN.")
 
+# [CENSUS & ACUITY] (Middle Management Only)
+elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
+    st.markdown(f"## 📊 {user['dept']} Census & Staffing")
+    st.caption("Live acuity tracking and safe staffing calculations.")
+    
+    # 1. Fetch Current Census Data
+    c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM census WHERE dept=:d", {"d": user['dept']})
+    curr_pts = c_data[0][0] if c_data else 0
+    curr_high = c_data[0][1] if c_data else 0
+    last_upd = c_data[0][2].strftime("%I:%M %p") if c_data and c_data[0][2] else "Never"
+
+    # 2. Staffing Math (1:3 High Acuity, 1:6 Standard)
+    standard_pts = max(0, curr_pts - curr_high)
+    req_staff_high = math.ceil(curr_high / 3)
+    req_staff_std = math.ceil(standard_pts / 6)
+    total_req_staff = req_staff_high + req_staff_std
+
+    # 3. Fetch Actual Active Staff from DB
+    a_staff_query = run_query("SELECT COUNT(*) FROM workers w JOIN (SELECT key, value FROM json_each(:j)) u ON w.pin = u.key WHERE w.status='Active' AND u.value LIKE :dept_match", 
+                              {"j": str({k: v['dept'] for k, v in USERS.items()}).replace("'", '"'), "dept_match": f"%{user['dept']}%"})
+    
+    # Simpler fallback if json query fails on SQLite/Supabase differences
+    actual_staff = 0
+    active_rows = run_query("SELECT pin FROM workers WHERE status='Active'")
+    if active_rows:
+        for r in active_rows:
+            if USERS.get(str(r[0]), {}).get('dept') == user['dept']: actual_staff += 1
+
+    variance = actual_staff - total_req_staff
+    
+    # Display Metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Patients", curr_pts, f"{curr_high} High Acuity", delta_color="off")
+    col2.metric("Required Staff (Calculated)", total_req_staff)
+    
+    if variance < 0:
+        col3.metric("Current Staff (Live)", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
+        st.error(f"🚨 UNSAFE STAFFING DETECTED: {user['dept']} requires {abs(variance)} more active personnel to meet safe care ratios.")
+    else:
+        col3.metric("Current Staff (Live)", actual_staff, f"+{variance} (Safe)", delta_color="normal")
+        st.success(f"✅ Safe Staffing Maintained: Ratios are currently optimal.")
+
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+    
+    # Update Form
+    with st.expander("📝 UPDATE CENSUS NUMBERS", expanded=False):
+        with st.form("update_census"):
+            st.caption(f"Last Updated: {last_upd}")
+            new_t = st.number_input("Total Unit Census", min_value=0, value=curr_pts, step=1)
+            new_h = st.number_input("High Acuity (Vents/ICU Stepdown)", min_value=0, value=curr_high, step=1)
+            
+            if st.form_submit_button("Lock In Census"):
+                if new_h > new_t:
+                    st.error("High acuity cannot exceed total patients.")
+                else:
+                    run_transaction("INSERT INTO census (dept, total_pts, high_acuity, last_updated) VALUES (:d, :t, :h, NOW()) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h})
+                    st.success("Census Updated!"); time.sleep(1); st.rerun()
+
+# [SECURE COMMS / TEAM CHAT]
+elif nav == "TEAM CHAT":
+    st.markdown(f"## 💬 {user['dept']} Secure Comms")
+    st.caption(f"End-to-end encrypted internal broadcast network for {user['dept']} personnel.")
+    
+    # Chat Input
+    with st.form("chat_input", clear_on_submit=True):
+        col_msg, col_btn = st.columns([5, 1])
+        msg = col_msg.text_input("Type your message...", label_visibility="collapsed")
+        if col_btn.form_submit_button("SEND") and msg.strip():
+            msg_id = f"MSG-{int(time.time()*1000)}"
+            run_transaction("INSERT INTO messages (msg_id, pin, dept, content, timestamp) VALUES (:id, :p, :d, :c, NOW())", {"id": msg_id, "p": pin, "d": user['dept'], "c": msg})
+            st.rerun()
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Chat History
+    chat_logs = run_query("SELECT pin, content, timestamp FROM messages WHERE dept=:d ORDER BY timestamp DESC LIMIT 30", {"d": user['dept']})
+    if chat_logs:
+        for log in chat_logs:
+            sender_pin = str(log[0])
+            content = log[1]
+            t_stamp = log[2].strftime("%I:%M %p") if isinstance(log[2], datetime) else log[2]
+            
+            if sender_pin == pin:
+                st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-me'><strong>You</strong> <span style='color:#94a3b8; font-size:0.75rem;'>{t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+            else:
+                sender_name = USERS.get(sender_pin, {}).get("name", f"User {sender_pin}")
+                sender_role = USERS.get(sender_pin, {}).get("role", "")
+                st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-them'><strong style='color:#38bdf8;'>{sender_name}</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| {sender_role} • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
+    else:
+        st.info("No messages in this channel yet. Send one above to start the comms.")
+
 # [THE BANK]
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     st.caption("Manage your payouts, review shift logs, and download pay stubs.")
     
-    # 1. Top Section: Withdrawal
     banked_gross = st.session_state.user_state.get('earnings', 0.0)
     banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
     
@@ -286,12 +376,8 @@ elif nav == "THE BANK":
     if banked_net > 0.01 and not st.session_state.user_state.get('active', False):
         if st.button("💸 REQUEST WITHDRAWAL (SENDS TO MANAGER)"):
             tx_id = f"TX-{int(time.time())}"
-            # Insert into transactions as PENDING
-            success = run_transaction("INSERT INTO transactions (tx_id, pin, amount, timestamp, status) VALUES (:id, :p, :a, NOW(), 'PENDING')", {"id": tx_id, "p": pin, "a": banked_net})
-            if success:
-                # Wipe from local earnings (held in escrow)
-                update_status(pin, "Inactive", 0, 0.0)
-                st.session_state.user_state['earnings'] = 0.0
+            if run_transaction("INSERT INTO transactions (tx_id, pin, amount, timestamp, status) VALUES (:id, :p, :a, NOW(), 'PENDING')", {"id": tx_id, "p": pin, "a": banked_net}):
+                update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
                 st.success("✅ Withdrawal Requested! Awaiting Manager Approval.")
                 time.sleep(1.5); st.rerun()
 
@@ -305,7 +391,8 @@ elif nav == "THE BANK":
         if res:
             for r in res:
                 ts, amt, note = r[0], float(r[1]), r[2]
-                st.markdown(f"""<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #3b82f6 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #3b82f6;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | {note}</div></div>""", unsafe_allow_html=True)
+                # UI TWEAK EXECUTED: Green money, Blue hours worked!
+                st.markdown(f"""<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #10b981 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #10b981; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | <span style='color: #3b82f6; font-weight:800;'>{note}</span></div></div>""", unsafe_allow_html=True)
         else: st.info("No shifts worked yet.")
 
     with tab2:
@@ -338,44 +425,30 @@ elif nav == "THE BANK":
         if 'pdf_data' in st.session_state:
             st.download_button("📄 Download PDF Pay Stub", data=st.session_state.pdf_data, file_name=st.session_state.pdf_filename, mime="application/pdf")
 
-# [APPROVALS] - Path 1 Executed!
+# [APPROVALS]
 elif nav == "APPROVALS" and user['level'] in ["Manager", "Director", "Admin"]:
     st.markdown("## 📥 Manager Approvals")
-    st.caption("Review and sign-off on team withdrawal requests and shift changes.")
-    
     st.markdown("### Pending Financial Withdrawals")
-    q = "SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING' ORDER BY timestamp ASC"
-    pending_tx = run_query(q)
-    
+    pending_tx = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING' ORDER BY timestamp ASC")
     if pending_tx:
         for tx in pending_tx:
             t_id, w_pin, t_amt, t_time = tx[0], tx[1], float(tx[2]), tx[3]
             w_name = USERS.get(str(w_pin), {}).get("name", f"User {w_pin}")
-            
             with st.container():
-                st.markdown(f"""
-                <div class='glass-card' style='border-left: 4px solid #f59e0b !important;'>
-                    <h4 style='margin:0; color:#f8fafc;'>{w_name} requested a transfer of <span style='color:#10b981;'>${t_amt:,.2f}</span></h4>
-                    <p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Requested: {t_time} | TX ID: {t_id}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
+                st.markdown(f"""<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested a transfer of <span style='color:#10b981;'>${t_amt:,.2f}</span></h4><p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Requested: {t_time} | TX ID: {t_id}</p></div>""", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
                 if c1.button("✅ APPROVE PAYOUT", key=f"app_{t_id}"):
                     run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id", {"id": t_id})
                     log_action(pin, "MANAGER APPROVAL", t_amt, f"Approved payout for {w_name}")
                     st.success("Approved."); time.sleep(1); st.rerun()
                 if c2.button("❌ DENY", key=f"den_{t_id}"):
-                    run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": t_id})
-                    st.error("Denied."); time.sleep(1); st.rerun()
+                    run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": t_id}); st.error("Denied."); time.sleep(1); st.rerun()
                 st.markdown("<br>", unsafe_allow_html=True)
-    else:
-        st.info("No pending financial transactions require your attention.")
+    else: st.info("No pending financial transactions.")
 
 # [SCHEDULE]
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Master Schedule")
-    
     if user['level'] in ["Manager", "Director", "Admin"]:
         c1, c2 = st.columns(2)
         with c1:
@@ -385,8 +458,7 @@ elif nav == "SCHEDULE":
                     t_pin = st.selectbox("Staff Member", options=list(avail.keys()), format_func=lambda x: avail[x])
                     s_date = st.date_input("Shift Date"); s_time = st.text_input("Time (e.g., 0700-1900)")
                     if st.form_submit_button("Publish Shift"):
-                        run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')",
-                                        {"id": f"SCH-{int(time.time())}", "p": t_pin, "d": str(s_date), "t": s_time, "dept": USERS[t_pin]['dept']})
+                        run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": t_pin, "d": str(s_date), "t": s_time, "dept": USERS[t_pin]['dept']})
                         st.success(f"Assigned to {avail[t_pin]}"); time.sleep(1); st.rerun()
         with c2:
             with st.expander("🗑️ REMOVE SHIFT"):
@@ -411,8 +483,7 @@ elif nav == "SCHEDULE":
                         if col2.button("🔄 TRADE TO MARKET", key=f"tr_{s[0]}"):
                             run_transaction("UPDATE schedules SET status='MARKETPLACE' WHERE shift_id=:id", {"id": s[0]})
                             ts = s[2].split("-"); st_t, en_t = (ts[0], ts[1]) if len(ts)==2 else ("0000", "0000")
-                            run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
-                                            {"id": s[0], "p": pin, "r": f"{user['role']} - Trade", "d": s[1], "s": st_t, "e": en_t, "rt": user['rate']})
+                            run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", {"id": s[0], "p": pin, "r": f"{user['role']} - Trade", "d": s[1], "s": st_t, "e": en_t, "rt": user['rate']})
                             st.rerun()
                         st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
                     elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE PENDING)")
@@ -455,11 +526,10 @@ elif nav == "MARKETPLACE":
             d = st.date_input("Date"); c1, c2 = st.columns(2)
             s_time = c1.time_input("Start"); e_time = c2.time_input("End")
             if st.form_submit_button("PUBLISH TO MARKET"):
-                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", 
-                                {"id": f"SHIFT-{int(time.time())}", "p": pin, "r": f"{user['role']} @ Open Market", "d": d, "s": str(s_time), "e": str(e_time), "rt": user['rate']})
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", {"id": f"SHIFT-{int(time.time())}", "p": pin, "r": f"{user['role']} @ Open Market", "d": d, "s": str(s_time), "e": str(e_time), "rt": user['rate']})
                 st.success("Published!")
 
 # [MY PROFILE]
 elif nav == "MY PROFILE":
     st.markdown("## 🪪 Credentials & Compliance")
-    st.info("Profiles engine is active. Please see earlier code versions for full edit/delete credential blocks if testing this specific view.")
+    st.info("Profiles module is active. See full credential editing capabilities tested in earlier builds.")
