@@ -71,7 +71,7 @@ GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
 
 USERS = {
-    "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False, "phone": "+15555555555"},
+    "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False, "phone": "+15551234567"},
     "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False, "phone": None},
     "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True, "phone": None},
     "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True, "phone": None},
@@ -108,7 +108,6 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS vaccines (vax_id text PRIMARY KEY, pin text, vax_type text, admin_date text, exp_date text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, signed_date timestamp DEFAULT NOW());"))
-            # NEW: PTO Table
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.commit()
         return engine
@@ -209,7 +208,8 @@ with st.sidebar:
     st.caption(f"{user['role']} | {user['dept']}")
     st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
     
-    if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "MASTER SCHEDULE", "APPROVALS"]
+    # CFO MENU UPDATED (No standard Schedule)
+    if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
     elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "ASSIGNMENTS", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
     elif user['level'] == "Supervisor": menu_items = ["DASHBOARD", "CENSUS & ACUITY", "ASSIGNMENTS", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
     else: menu_items = ["DASHBOARD", "ASSIGNMENTS", chat_label, "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
@@ -235,14 +235,14 @@ if nav == "DASHBOARD":
         st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
         st.markdown("### 🎛️ Departmental Overview")
         
-        # Gathering Data for Manager
         active_staff = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")
         active_count = active_staff[0][0] if active_staff else 0
         
         open_shifts = run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'")
         shifts_count = open_shifts[0][0] if open_shifts else 0
         
-        pending_tx = run_query("SELECT COUNT(*) FROM transactions WHERE status='PENDING'")
+        # Manager only sees PENDING_MGR transactions
+        pending_tx = run_query("SELECT COUNT(*) FROM transactions WHERE status='PENDING_MGR'")
         tx_count = pending_tx[0][0] if pending_tx else 0
         
         pending_pto = run_query("SELECT COUNT(*) FROM pto_requests WHERE status='PENDING'")
@@ -251,13 +251,12 @@ if nav == "DASHBOARD":
         c1, c2, c3 = st.columns(3)
         c1.metric("Live Staff on Floor", active_count)
         c2.metric("Unfilled SOS / Market Shifts", shifts_count, f"{shifts_count} Critical" if shifts_count > 0 else "Fully Staffed", delta_color="inverse")
-        c3.metric("Pending Approvals", tx_count + pto_count, f"{tx_count} Payouts | {pto_count} PTO", delta_color="off")
+        c3.metric("Pending Approvals", tx_count + pto_count, f"{tx_count} Hours to Verify | {pto_count} PTO", delta_color="off")
         st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
         
     else:
         st.markdown(f"<h1 style='font-weight: 800;'>{greeting}, {user['name'].split(' ')[0]}</h1>", unsafe_allow_html=True)
 
-    # Worker Clock-in Engine (Available for all)
     active = st.session_state.user_state.get('active', False)
     running_earn = 0.0
     if active: running_earn = ((time.time() - st.session_state.user_state['start_time']) / 3600) * user['rate']
@@ -339,7 +338,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     with t_finance:
         st.markdown("### CFO Predictive Analytics Board")
         
-        # Raw Data Extraction
         raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
         
         if raw_history:
@@ -351,7 +349,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
             agency_cost = total_spend * 2.5
             agency_avoidance = agency_cost - total_spend
             
-            # Top KPIs
             c1, c2, c3 = st.columns(3)
             c1.metric("Internal Labor Spend (Total)", f"${total_spend:,.2f}")
             c2.metric("Projected Agency Cost (2.5x)", f"${agency_cost:,.2f}")
@@ -369,7 +366,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                 
             with col_chart2:
                 st.markdown("#### Agency Avoidance Efficiency")
-                # Using a Plotly Gauge to make it look super high-end
                 fig_gauge = go.Figure(go.Indicator(
                     mode = "gauge+number",
                     value = agency_avoidance,
@@ -392,7 +388,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
             fig_area.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=20, b=0))
             st.plotly_chart(fig_area, use_container_width=True)
             
-            # Export Function for CFO
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Export Raw Financial Ledger (CSV)", data=csv, file_name='ec_financial_ledger.csv', mime='text/csv')
             
@@ -419,6 +414,42 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                 st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=pdk.ViewState(latitude=df_fleet['lat'].mean(), longitude=df_fleet['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10', tooltip={"text": "{name}"}))
         else:
             st.info("No active operators in the field.")
+
+# [FINANCIAL FORECAST - CFO VIEW ONLY]
+elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
+    st.markdown("## 📊 Predictive Payroll Outflow")
+    st.caption("Forecasted schedule liabilities vs. real-time SOS critical demand.")
+    
+    # Calculate Scheduled Baseline
+    scheds = run_query("SELECT pin FROM schedules WHERE status='SCHEDULED'")
+    base_outflow = 0.0
+    if scheds:
+        for s in scheds:
+            w_pin = str(s[0])
+            base_outflow += (USERS.get(w_pin, {}).get('rate', 0.0) * 12) # Assuming 12hr shifts for forecast model
+
+    # Calculate Critical Open Variance
+    open_markets = run_query("SELECT rate FROM marketplace WHERE status='OPEN'")
+    critical_outflow = 0.0
+    if open_markets:
+        for m in open_markets:
+            critical_outflow += (float(m[0]) * 12) # Assuming 12hr shifts
+
+    total_projected = base_outflow + critical_outflow
+    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Scheduled Baseline", f"${base_outflow:,.2f}")
+    c2.metric("Critical SOS Liability", f"${critical_outflow:,.2f}", f"{len(open_markets) if open_markets else 0} Open Shifts", delta_color="inverse")
+    c3.metric("Total Forecasted Outflow", f"${total_projected:,.2f}")
+    
+    st.markdown("<br><hr style='border-color: rgba(255,255,255,0.1);'><br>", unsafe_allow_html=True)
+    st.markdown("### Scheduled Shift Roster")
+    full_scheds = run_query("SELECT shift_id, pin, shift_date, shift_time, department FROM schedules WHERE status='SCHEDULED' ORDER BY shift_date ASC")
+    if full_scheds:
+        for s in full_scheds:
+            owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}")
+            st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{owner}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
+    else: st.info("No baseline shifts scheduled.")
 
 # [CENSUS & ACUITY + TWILIO SOS]
 elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
@@ -471,52 +502,73 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
                     else: run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h)", {"d": user['dept'], "t": new_t, "h": new_h})
                     st.success("Census Updated!"); time.sleep(1); st.rerun()
 
-# [APPROVALS ENGINE - PAYOUTS & PTO]
+# [TWO-STEP SOX APPROVALS ENGINE]
 elif nav == "APPROVALS" and user['level'] in ["Manager", "Director", "Admin"]:
-    st.markdown("## 📥 Manager Approvals")
+    st.markdown("## 📥 Approval Gateway")
     if st.button("🔄 Refresh Queue"): st.rerun()
     
-    tab_fin, tab_pto = st.tabs(["💸 FINANCIAL PAYOUTS", "🏝️ PTO REQUESTS"])
-    
-    with tab_fin:
-        st.markdown("### Pending Financial Withdrawals")
-        pending_tx = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING' ORDER BY timestamp ASC")
-        if pending_tx:
-            for tx in pending_tx:
+    # CFO View
+    if user['level'] == "Admin":
+        st.markdown("### Stage 2: Treasury Release (CFO Verification)")
+        pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
+        if pending_cfo:
+            for tx in pending_cfo:
                 t_id, w_pin, t_amt, t_time = tx[0], tx[1], float(tx[2]), tx[3]
                 w_name = USERS.get(str(w_pin), {}).get("name", f"User {w_pin}")
                 with st.container():
-                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested a transfer of <span style='color:#10b981;'>${t_amt:,.2f}</span></h4><p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Requested: {t_time}</p></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name}</h4><div style='color:#38bdf8; font-weight:bold; margin-top:5px;'>Verified Funds: ${t_amt:,.2f}</div><div style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>TX ID: {t_id}</div></div>", unsafe_allow_html=True)
                     c1, c2 = st.columns(2)
-                    if c1.button("✅ APPROVE PAYOUT", key=f"app_{t_id}"):
+                    if c1.button("💸 AUTHORIZE & RELEASE FUNDS", key=f"cfo_app_{t_id}"):
                         run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id", {"id": t_id})
-                        log_action(pin, "MANAGER APPROVAL", t_amt, f"Approved payout for {w_name}")
+                        log_action(pin, "FUNDS RELEASED", t_amt, f"CFO Authorized payout for {w_name}")
                         target_phone = USERS.get(str(w_pin), {}).get('phone')
-                        if target_phone: send_sms(target_phone, f"EC PROTOCOL: Your payout of ${t_amt:,.2f} has been approved.")
-                        st.success("Approved."); time.sleep(1.5); st.rerun()
-                    if c2.button("❌ DENY", key=f"den_{t_id}"):
-                        run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": t_id}); st.error("Denied."); time.sleep(1); st.rerun()
-        else: st.info("No pending financial transactions.")
+                        if target_phone: send_sms(target_phone, f"EC PROTOCOL: Your payout of ${t_amt:,.2f} has been fully authorized and released to your bank.")
+                        st.success("Funds Released."); time.sleep(1.5); st.rerun()
+                    if c2.button("❌ DENY / RETURN TO MGR", key=f"cfo_den_{t_id}"):
+                        run_transaction("UPDATE transactions SET status='PENDING_MGR' WHERE tx_id=:id", {"id": t_id}); st.error("Returned to unit manager."); time.sleep(1); st.rerun()
+        else: st.info("No funds pending CFO authorization.")
 
-    with tab_pto:
-        st.markdown("### Pending Time-Off Requests")
-        pending_pto = run_query("SELECT req_id, pin, start_date, end_date, reason, submitted FROM pto_requests WHERE status='PENDING' ORDER BY submitted ASC")
-        if pending_pto:
-            for pto in pending_pto:
-                p_id, p_pin, start_d, end_d, reason, p_time = pto[0], pto[1], pto[2], pto[3], pto[4], pto[5]
-                w_name = USERS.get(str(p_pin), {}).get("name", f"User {p_pin}")
-                with st.container():
-                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #8b5cf6 !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested PTO</h4><div style='color:#38bdf8; font-weight:bold; margin-top:5px;'>Dates: {start_d} to {end_d}</div><div style='color:#94a3b8; font-size:0.9rem; margin-top:5px;'>Reason: {reason}</div></div>", unsafe_allow_html=True)
-                    c1, c2 = st.columns(2)
-                    if c1.button("✅ APPROVE PTO", key=f"app_pto_{p_id}"):
-                        run_transaction("UPDATE pto_requests SET status='APPROVED' WHERE req_id=:id", {"id": p_id})
-                        target_phone = USERS.get(str(p_pin), {}).get('phone')
-                        if target_phone: send_sms(target_phone, f"EC PROTOCOL: Your PTO request for {start_d} has been APPROVED.")
-                        st.success("PTO Approved."); time.sleep(1.5); st.rerun()
-                    if c2.button("❌ DENY", key=f"den_pto_{p_id}"):
-                        run_transaction("UPDATE pto_requests SET status='DENIED' WHERE req_id=:id", {"id": p_id})
-                        st.error("PTO Denied."); time.sleep(1); st.rerun()
-        else: st.info("No pending PTO requests.")
+    # Manager View
+    else:
+        tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
+        with tab_fin:
+            st.markdown("### Stage 1: Clinical Verification")
+            st.caption("Verify the requested shift hours. Capital release requires secondary CFO authorization.")
+            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
+            if pending_mgr:
+                for tx in pending_mgr:
+                    t_id, w_pin, t_amt, t_time = tx[0], tx[1], float(tx[2]), tx[3]
+                    w_name = USERS.get(str(w_pin), {}).get("name", f"User {w_pin}")
+                    with st.container():
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested payout</h4><div style='color:#10b981; font-weight:bold; margin-top:5px;'>Gross Est: ${t_amt:,.2f}</div><div style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Requested: {t_time}</div></div>", unsafe_allow_html=True)
+                        c1, c2 = st.columns(2)
+                        if c1.button("☑️ VERIFY HOURS", key=f"mgr_app_{t_id}"):
+                            run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id", {"id": t_id})
+                            log_action(pin, "MANAGER VERIFIED", t_amt, f"Hours verified for {w_name}")
+                            st.success("Hours verified. Sent to CFO for fund release."); time.sleep(1.5); st.rerun()
+                        if c2.button("❌ DENY", key=f"mgr_den_{t_id}"):
+                            run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": t_id}); st.error("Denied."); time.sleep(1); st.rerun()
+            else: st.info("No shift hours pending verification.")
+
+        with tab_pto:
+            st.markdown("### Pending Time-Off Requests")
+            pending_pto = run_query("SELECT req_id, pin, start_date, end_date, reason, submitted FROM pto_requests WHERE status='PENDING' ORDER BY submitted ASC")
+            if pending_pto:
+                for pto in pending_pto:
+                    p_id, p_pin, start_d, end_d, reason, p_time = pto[0], pto[1], pto[2], pto[3], pto[4], pto[5]
+                    w_name = USERS.get(str(p_pin), {}).get("name", f"User {p_pin}")
+                    with st.container():
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid #8b5cf6 !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested PTO</h4><div style='color:#38bdf8; font-weight:bold; margin-top:5px;'>Dates: {start_d} to {end_d}</div><div style='color:#94a3b8; font-size:0.9rem; margin-top:5px;'>Reason: {reason}</div></div>", unsafe_allow_html=True)
+                        c1, c2 = st.columns(2)
+                        if c1.button("✅ APPROVE PTO", key=f"app_pto_{p_id}"):
+                            run_transaction("UPDATE pto_requests SET status='APPROVED' WHERE req_id=:id", {"id": p_id})
+                            target_phone = USERS.get(str(p_pin), {}).get('phone')
+                            if target_phone: send_sms(target_phone, f"EC PROTOCOL: Your PTO request for {start_d} has been APPROVED.")
+                            st.success("PTO Approved."); time.sleep(1.5); st.rerun()
+                        if c2.button("❌ DENY", key=f"den_pto_{p_id}"):
+                            run_transaction("UPDATE pto_requests SET status='DENIED' WHERE req_id=:id", {"id": p_id})
+                            st.error("PTO Denied."); time.sleep(1); st.rerun()
+            else: st.info("No pending PTO requests.")
 
 # [ENTERPRISE HR VAULT & PTO REQUESTER]
 elif nav == "MY PROFILE":
@@ -571,6 +623,54 @@ elif nav == "MY PROFILE":
         if hr_rec: st.success("✅ **ONBOARDING COMPLETE**")
         else: st.warning("⚠️ **ACTION REQUIRED: Please complete onboarding.**")
 
+# [THE BANK - MODIFIED FOR PENDING_MGR LOGIC]
+elif nav == "THE BANK":
+    st.markdown("## 🏦 The Bank")
+    if st.button("🔄 Refresh Bank Ledger"): st.rerun()
+    banked_gross = st.session_state.user_state.get('earnings', 0.0)
+    banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
+    
+    st.markdown(f"<div class='glass-card' style='text-align: center; border-left: 4px solid #10b981 !important;'><h3 style='color: #94a3b8; margin-bottom: 5px;'>AVAILABLE FOR WITHDRAWAL</h3><h1 style='color: #10b981; font-size: 3rem; margin: 0;'>${banked_net:,.2f}</h1><p style='color: #64748b;'>Gross Accrued: ${banked_gross:,.2f} (Taxes Withheld: ${banked_gross - banked_net:,.2f})</p></div>", unsafe_allow_html=True)
+    
+    if banked_net > 0.01 and not st.session_state.user_state.get('active', False):
+        if st.button("💸 REQUEST WITHDRAWAL (SENDS TO MANAGER)"):
+            tx_id = f"TX-{int(time.time())}"
+            # Send specifically to PENDING_MGR state
+            if run_transaction("INSERT INTO transactions (tx_id, pin, amount, timestamp, status) VALUES (:id, :p, :a, NOW(), 'PENDING_MGR')", {"id": tx_id, "p": pin, "a": banked_net}):
+                update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
+                st.success("✅ Withdrawal Requested! Awaiting Clinical Manager verification."); time.sleep(1.5); st.rerun()
+
+    tab1, tab2, tab3 = st.tabs(["SHIFT LOGS", "WITHDRAWAL HISTORY", "PAY STUBS"])
+    with tab1:
+        res = run_query("SELECT timestamp, amount, note FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 30", {"p": pin})
+        if res:
+            for r in res:
+                ts, amt, note = r[0], float(r[1]), r[2]
+                st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #10b981 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #10b981; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | <span style='color: #3b82f6; font-weight:800;'>{note}</span></div></div>", unsafe_allow_html=True)
+        else: st.info("No shifts worked yet.")
+    with tab2:
+        res = run_query("SELECT timestamp, amount, status FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        if res:
+            for r in res:
+                ts, amt, status = r[0], float(r[1]), r[2]
+                # UI logic for the two-tier status display
+                display_status = "VERIFYING HOURS" if status == "PENDING_MGR" else "AWAITING CFO RELEASE" if status == "PENDING_CFO" else status
+                color = "#10b981" if status == "APPROVED" else "#f59e0b" if "PENDING" in status else "#ff453a"
+                st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid {color} !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Transfer Request</strong><strong style='color: {color}; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem; margin-top: 5px;'>{ts} | Status: <strong style='color:{color};'>{display_status}</strong></div></div>", unsafe_allow_html=True)
+        else: st.info("No withdrawal history.")
+    with tab3:
+        with st.form("pay_stub_form"):
+            c1, c2 = st.columns(2)
+            start_d = c1.date_input("Start Date", value=date.today() - timedelta(days=14)); end_d = c2.date_input("End Date", value=date.today())
+            if st.form_submit_button("Generate PDF Statement") and PDF_ACTIVE:
+                period_gross = get_period_gross(pin, start_d, end_d)
+                if period_gross > 0:
+                    st.session_state.pdf_data = generate_pay_stub(user, start_d, end_d, period_gross, get_ytd_gross(pin))
+                    st.session_state.pdf_filename = f"PayStub_{pin}_{end_d}.pdf"
+                    st.success("✅ Pay Stub Generated!")
+                else: st.warning("No earnings found for this period.")
+        if 'pdf_data' in st.session_state: st.download_button("📄 Download PDF Pay Stub", data=st.session_state.pdf_data, file_name=st.session_state.pdf_filename, mime="application/pdf")
+
 # [OTHER TABS MINIMIZED FOR TERMINAL SPACE]
-elif nav in ["COMMS & CHAT", "ASSIGNMENTS", "MARKETPLACE", "SCHEDULE", "THE BANK"]:
-    st.info(f"{nav} engine is active in the background. Navigate to Command Center or Approvals to test the Executive Update.")
+elif nav in ["ASSIGNMENTS", "MARKETPLACE", "SCHEDULE"]:
+    st.info(f"{nav} engine is active in the background. Navigate to Approvals or Forecast to test the new Separation of Duties.")
