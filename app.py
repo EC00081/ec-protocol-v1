@@ -48,13 +48,15 @@ html_style = """
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
     p, h1, h2, h3, h4, h5, h6, div, label, button, input, select, textarea { font-family: 'Inter', sans-serif !important; }
     
-    /* WHITE-LABEL OVERRIDES: Hide Streamlit artifacts & stretch canvas */
+    /* WHITE-LABEL OVERRIDES: Hide artifacts but KEEP sidebar toggle */
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {display: none !important;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} 
+    header {background: transparent !important;} /* Make header invisible instead of display:none */
+    [data-testid="stToolbar"] {display: none !important;} /* Hide right-side deploy/GitHub buttons */
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
     
-    /* CUSTOM STICKY HEADER */
-    .sticky-header { position: sticky; top: 0; z-index: 999; background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 20px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-top: -1rem; margin-bottom: 25px; border-radius: 0 0 16px 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
+    /* CUSTOM STICKY HEADER - Added left padding to dodge the toggle button */
+    .sticky-header { position: sticky; top: 0; z-index: 998; background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 20px 15px 60px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-top: -1rem; margin-bottom: 25px; border-radius: 0 0 16px 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
     
     /* GLASS CARDS & METRICS */
     div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); margin-bottom: 15px; }
@@ -90,6 +92,8 @@ html_style = """
         div[data-testid="metric-container"] { padding: 15px; }
         div[data-testid="stMetricValue"] { font-size: 1.5rem !important; }
         .bounty-amount { font-size: 2.2rem; }
+        /* Mobile adjustment for sticky header padding so toggle doesn't get covered */
+        .sticky-header { padding: 15px 15px 15px 60px !important; }
     }
 </style>
 """
