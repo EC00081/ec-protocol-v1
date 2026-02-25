@@ -60,7 +60,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 3. DATABASE ENGINE & NUCLEAR MIGRATION ---
+# --- 3. DATABASE ENGINE ---
 @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
@@ -71,17 +71,6 @@ def get_db_engine():
     if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
     try:
         engine = create_engine(url)
-        with engine.connect() as conn:
-            # Standard Tables
-            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            # NUCLEAR FIX: Brand new names to bypass broken schemas
-            conn.execute(text("CREATE TABLE IF NOT EXISTS comms_log (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
-            conn.commit()
         return engine
     except Exception as e: 
         print(f"DB Connection Error: {e}")
@@ -175,7 +164,7 @@ if PDF_ACTIVE:
         pdf.set_font('Arial', 'B', 14); pdf.cell(63, 10, f"${period_gross:,.2f}", 0, 0, 'C'); pdf.set_text_color(239, 68, 68); pdf.cell(63, 10, f"${sum(pt.values()):,.2f}", 0, 0, 'C'); pdf.set_text_color(16, 185, 129); pdf.cell(63, 10, f"${net_pay:,.2f}", 0, 1, 'C')
         return bytes(pdf.output(dest='S'))
 
-# --- 6. AUTH SCREEN ---
+# --- 6. AUTH SCREEN & SESSION INIT ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 if 'logged_in_user' not in st.session_state:
@@ -191,6 +180,8 @@ if 'logged_in_user' not in st.session_state:
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]
                 st.session_state.pin = auth_pin
+                # Set initial read time to right now to prevent old messages from triggering bubble
+                st.session_state.last_read_chat = datetime.utcnow()
                 force_cloud_sync(auth_pin)
                 st.rerun()
             else: st.error("❌ INVALID CREDENTIALS")
@@ -200,13 +191,24 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- Check For Recent Messages (Notification Bubble) ---
+# --- SMART NOTIFICATION LOGIC ---
 chat_label = "COMMS & CHAT"
-try:
-    recent_msg = run_query("SELECT count(*) FROM comms_log WHERE timestamp >= NOW() - INTERVAL '12 hours'")
-    if recent_msg and recent_msg[0][0] > 0:
+if 'last_read_chat' not in st.session_state:
+    st.session_state.last_read_chat = datetime.utcnow()
+
+# Check DB for max timestamp
+latest_msg_q = run_query("SELECT MAX(timestamp) FROM comms_log")
+if latest_msg_q and latest_msg_q[0][0]:
+    latest_db_dt = pd.to_datetime(latest_msg_q[0][0])
+    if latest_db_dt.tzinfo is None:
+        latest_db_dt = latest_db_dt.tz_localize('UTC')
+        
+    session_read_dt = pd.to_datetime(st.session_state.last_read_chat)
+    if session_read_dt.tzinfo is None:
+        session_read_dt = session_read_dt.tz_localize('UTC')
+
+    if latest_db_dt > session_read_dt:
         chat_label = "COMMS & CHAT 🔴"
-except: pass
 
 # --- 7. NAVIGATION BUILDER ---
 with st.sidebar:
@@ -228,7 +230,12 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("LOGOUT"): st.session_state.clear(); st.rerun()
 
-if "COMMS & CHAT" in nav: nav = "COMMS & CHAT"
+# Intercept Chat Navigation to clear bubble
+if "COMMS" in nav:
+    st.session_state.last_read_chat = datetime.utcnow()
+    if "🔴" in nav:
+        st.rerun() # Force instant refresh to wipe the dot
+    nav = "COMMS & CHAT"
 
 # --- 8. ROUTING ---
 
@@ -290,14 +297,20 @@ if nav == "DASHBOARD":
 elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     
-    # Live Staff Refresh button for multi-tab testing
     if st.button("🔄 Refresh Live Database"):
         st.rerun()
         
     c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM unit_census WHERE dept=:d", {"d": user['dept']})
     curr_pts = c_data[0][0] if c_data else 0
     curr_high = c_data[0][1] if c_data else 0
-    last_upd = c_data[0][2].strftime("%I:%M %p") if c_data and c_data[0][2] else "Never"
+    
+    # Proper Timezone Conversion for "Last Updated"
+    if c_data and c_data[0][2]:
+        dt_obj = pd.to_datetime(c_data[0][2])
+        if dt_obj.tzinfo is None: dt_obj = dt_obj.tz_localize('UTC')
+        last_upd = dt_obj.astimezone(LOCAL_TZ).strftime("%I:%M %p")
+    else:
+        last_upd = "Never"
 
     standard_pts = max(0, curr_pts - curr_high)
     req_staff_high = math.ceil(curr_high / 3)
@@ -331,10 +344,15 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
                                 {"id": s_id, "p": pin, "r": f"🚨 SOS URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": incentive_rate})
             
             msg_id = f"MSG-SOS-{int(time.time()*1000)}"
-            sos_msg = f"SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
             
-            success_msg1 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg}) 
-            success_msg2 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": f"[{user['dept'].upper()}] {sos_msg}"}) 
+            # 1. Dept Specific Message (Includes Pay Rate)
+            sos_msg_dept = f"🚨 SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
+            
+            # 2. Global Hospital Message (Scrubbed Pay Rate)
+            sos_msg_global = f"[{user['dept'].upper()}] SYSTEM ALERT: The unit is critically understaffed by {missing_count}. Emergency shifts have been posted to the Marketplace! Check your schedules."
+            
+            success_msg1 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg_dept}) 
+            success_msg2 = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": sos_msg_global}) 
             
             if success_market and success_msg1:
                 st.success("🚨 SOS Broadcasted! Shifts pushed to Marketplace and alert sent to Team Chat.")
@@ -356,19 +374,15 @@ elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Di
                 if new_h > new_t: 
                     st.error("High acuity cannot exceed total patients.")
                 else:
-                    # NUCLEAR FIX: Checks manually instead of relying on ON CONFLICT
                     exists = run_query("SELECT 1 FROM unit_census WHERE dept=:d", {"d": user['dept']})
                     if exists:
                         success = run_transaction("UPDATE unit_census SET total_pts=:t, high_acuity=:h, last_updated=NOW() WHERE dept=:d", {"d": user['dept'], "t": new_t, "h": new_h})
                     else:
                         success = run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h)", {"d": user['dept'], "t": new_t, "h": new_h})
-                    
-                    if success:
-                        st.success("Census Updated!"); time.sleep(1); st.rerun()
-                    else:
-                        st.error("Database connection failed. Census not updated.")
+                    if success: st.success("Census Updated!"); time.sleep(1); st.rerun()
+                    else: st.error("Database connection failed. Census not updated.")
 
-# [COMMS & CHAT - Multi-Channel]
+# [COMMS & CHAT - Timezone Corrected]
 elif nav == "COMMS & CHAT":
     st.markdown("## 💬 Secure Comms Network")
     st.caption("End-to-end encrypted internal broadcast network.")
@@ -382,9 +396,8 @@ elif nav == "COMMS & CHAT":
             if col_btn.form_submit_button("SEND") and msg.strip():
                 msg_id = f"MSG-{int(time.time()*1000)}"
                 success = run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": pin, "d": channel_name, "c": msg})
-                if not success:
-                    st.error("Failed to push message to server.")
-                else:
+                if success:
+                    st.session_state.last_read_chat = datetime.utcnow()
                     st.rerun()
                 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -394,11 +407,15 @@ elif nav == "COMMS & CHAT":
             for log in chat_logs:
                 sender_pin = str(log[0])
                 content = log[1]
-                t_stamp = log[2].strftime("%I:%M %p") if isinstance(log[2], datetime) else log[2]
+                
+                # --- TIMEZONE FIX ---
+                db_ts = pd.to_datetime(log[2])
+                if db_ts.tzinfo is None: db_ts = db_ts.tz_localize('UTC')
+                t_stamp = db_ts.astimezone(LOCAL_TZ).strftime("%I:%M %p")
                 
                 if sender_pin == pin:
                     st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble chat-me'><strong>You</strong> <span style='color:#94a3b8; font-size:0.75rem;'>{t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
-                elif sender_pin == "9999": # System Broadcast
+                elif sender_pin == "9999": 
                      st.markdown(f"<div style='display:flex; flex-direction:column;'><div class='chat-bubble' style='background:rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.4); margin-right: auto; border-bottom-left-radius: 4px;'><strong style='color:#ef4444;'>SYSTEM ALERT</strong> <span style='font-size:0.75rem; color:#94a3b8;'>| Automated • {t_stamp}</span><br>{content}</div></div>", unsafe_allow_html=True)
                 else:
                     sender_name = USERS.get(sender_pin, {}).get("name", f"User {sender_pin}")
