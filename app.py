@@ -323,13 +323,27 @@ elif nav == "THE BANK":
                 ts, amt, note = r[0], float(r[1]), r[2]
                 st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #10b981 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #10b981; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | <span style='color: #3b82f6; font-weight:800;'>{note}</span></div></div>", unsafe_allow_html=True)
         else: st.info("No shifts worked yet.")
-    with tab2:
-        res = run_query("SELECT timestamp, amount, status FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+   with tab2:
+        st.markdown("### Transaction Status")
+        q = "SELECT timestamp, amount, status FROM transactions WHERE pin=:p ORDER BY timestamp DESC"
+        res = run_query(q, {"p": pin})
         if res:
             for r in res:
                 ts, amt, status = r[0], float(r[1]), r[2]
+                # Color Logic
                 color = "#10b981" if status == "APPROVED" else "#f59e0b" if status == "PENDING" else "#ff453a"
-                st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid {color} !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Transfer Request</strong><strong style='color: {color};'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | Status: {status}</div></div>", unsafe_allow_html=True)
+                
+                st.markdown(f"""
+                <div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid {color} !important;'>
+                    <div style='display: flex; justify-content: space-between;'>
+                        <strong style='color: #f8fafc;'>Transfer Request</strong>
+                        <strong style='color: {color}; font-size: 1.2rem;'>${amt:,.2f}</strong>
+                    </div>
+                    <div style='color: #94a3b8; font-size: 0.85rem; margin-top: 5px;'>
+                        {ts} | Status: <strong style='color: {color};'>{status}</strong>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
         else: st.info("No withdrawal history.")
     with tab3:
         with st.form("pay_stub_form"):
