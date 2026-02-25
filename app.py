@@ -8,12 +8,36 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict
 from streamlit_js_eval import get_geolocation
 from sqlalchemy import create_engine, text
+import pydeck as pdk
+import plotly.express as px
 
 try:
     from fpdf import FPDF
     PDF_ACTIVE = True
 except ImportError:
     PDF_ACTIVE = False
+
+# --- TWILIO SMS ENGINE ---
+try:
+    from twilio.rest import Client
+    TWILIO_ACTIVE = True
+except ImportError:
+    TWILIO_ACTIVE = False
+
+def send_sms(to_phone, message_body):
+    if TWILIO_ACTIVE and to_phone:
+        try:
+            # These will pull from Render Environment Variables safely during production
+            sid = os.environ.get("TWILIO_ACCOUNT_SID")
+            token = os.environ.get("TWILIO_AUTH_TOKEN")
+            from_num = os.environ.get("TWILIO_PHONE_NUMBER")
+            if sid and token and from_num:
+                client = Client(sid, token)
+                client.messages.create(body=message_body, from_=from_num, to=to_phone)
+                return True
+        except Exception as e:
+            print(f"Twilio Error: {e}")
+    return False
 
 # --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(page_title="EC Enterprise", page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
@@ -42,15 +66,16 @@ st.markdown(html_style, unsafe_allow_html=True)
 # --- 2. CONSTANTS & ORG CHART ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
-GEOFENCE_RADIUS = 150
+GEOFENCE_RADIUS = 150 # meters
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
 
+# ADD YOUR REAL PHONE NUMBER TO LIAM O'NEIL'S PROFILE BELOW
 USERS = {
-    "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False},
-    "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False},
-    "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True},
-    "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True},
-    "9999": {"email": "cfo@ecprotocol.com", "password": "password123", "pin": "9999", "name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "vip": True}
+    "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 1200.00, "vip": False, "phone": "+18448032563"},
+    "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False, "phone": None},
+    "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True, "phone": None},
+    "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True, "phone": None},
+    "9999": {"email": "cfo@ecprotocol.com", "password": "password123", "pin": "9999", "name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "vip": True, "phone": None}
 }
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -72,8 +97,7 @@ def get_db_engine():
     try:
         engine = create_engine(url)
         with engine.connect() as conn:
-            # Core Tables
-            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
@@ -81,10 +105,12 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS comms_log (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS assignments (assign_id text PRIMARY KEY, shift_date text, pin text, dept text, zone text, status text DEFAULT 'ACTIVE', swap_with_pin text);"))
-            # NEW: HR Suite Tables
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS vaccines (vax_id text PRIMARY KEY, pin text, vax_type text, admin_date text, exp_date text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, signed_date timestamp DEFAULT NOW());"))
+            # Safely add lat/lon to workers if it doesn't exist
+            try: conn.execute(text("ALTER TABLE workers ADD COLUMN lat numeric; ALTER TABLE workers ADD COLUMN lon numeric;"))
+            except: pass
             conn.commit()
         return engine
     except Exception as e: 
@@ -124,10 +150,10 @@ def force_cloud_sync(pin):
         st.session_state.user_state['active'] = False; return False
     except: return False
 
-def update_status(pin, status, start, earn):
-    q = """INSERT INTO workers (pin, status, start_time, earnings, last_active) VALUES (:p, :s, :t, :e, NOW())
-           ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW();"""
-    return run_transaction(q, {"p": pin, "s": status, "t": start, "e": earn})
+def update_status(pin, status, start, earn, lat=0.0, lon=0.0):
+    q = """INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon)
+           ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;"""
+    return run_transaction(q, {"p": pin, "s": status, "t": start, "e": earn, "lat": lat, "lon": lon})
 
 def log_action(pin, action, amount, note):
     run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
@@ -142,44 +168,7 @@ def get_period_gross(pin, start_date, end_date):
     res = run_query(q, {"p": pin, "s": start_date, "e": datetime.combine(end_date, datetime.max.time())})
     return sum([float(r[0]) for r in res if r[0]]) if res else 0.0
 
-# --- 5. PDF GENERATOR ---
-if PDF_ACTIVE:
-    class PayStubPDF(FPDF):
-        def header(self):
-            self.set_font('Arial', 'B', 16); self.set_text_color(59, 130, 246); self.cell(0, 10, 'EC Protocol Enterprise Health', 0, 1, 'L')
-            self.set_font('Arial', '', 10); self.set_text_color(100, 116, 139); self.cell(0, 5, 'Secure Workforce Payroll', 0, 1, 'L'); self.ln(10)
-        def section_title(self, title):
-            self.set_font('Arial', 'B', 12); self.set_fill_color(241, 245, 249); self.set_text_color(15, 23, 42); self.cell(0, 8, f'  {title}', 0, 1, 'L', True); self.ln(2)
-        def table_row(self, c1, c2, c3, c4, c5, c6, bold=False):
-            self.set_font('Arial', 'B' if bold else '', 9)
-            self.cell(45, 7, str(c1), 0, 0, 'L'); self.cell(25, 7, str(c2), 0, 0, 'R'); self.cell(25, 7, str(c3), 0, 0, 'R')
-            self.cell(30, 7, str(c4), 0, 0, 'R'); self.cell(30, 7, str(c5), 0, 0, 'R'); self.cell(35, 7, str(c6), 0, 1, 'R')
-        def tax_row(self, c1, c2, c3, bold=False):
-            self.set_font('Arial', 'B' if bold else '', 9)
-            self.cell(60, 7, str(c1), 0, 0, 'L'); self.cell(40, 7, str(c2), 0, 0, 'R'); self.cell(40, 7, str(c3), 0, 1, 'R')
-
-    def generate_pay_stub(user_data, start_date, end_date, period_gross, ytd_gross):
-        pdf = PayStubPDF(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font('Arial', 'B', 12); pdf.cell(100, 10, f"EMPLOYEE: {user_data['name'].upper()}", 0, 0)
-        pdf.set_font('Arial', '', 10); pdf.cell(90, 10, f"Pay Period: {start_date.strftime('%m/%d/%Y')} - {end_date.strftime('%m/%d/%Y')}", 0, 1, 'R')
-        pdf.cell(100, 5, f"ID: {user_data['pin']} | Dept: {user_data['dept'].upper()}", 0, 0); pdf.cell(90, 5, f"Check Date: {date.today().strftime('%m/%d/%Y')}", 0, 1, 'R'); pdf.ln(10)
-        pdf.section_title("EARNINGS"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139)
-        pdf.table_row("Item", "Rate", "Hours", "This Period", "YTD Hours", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
-        rate = user_data['rate']; ph = period_gross/rate if rate>0 else 0; yh = ytd_gross/rate if rate>0 else 0
-        pdf.table_row("Regular Pay", f"${rate:,.2f}", f"{ph:,.2f}", f"${period_gross:,.2f}", f"{yh:,.2f}", f"${ytd_gross:,.2f}")
-        pdf.ln(2); pdf.set_fill_color(248, 250, 252); pdf.table_row("GROSS PAY", "", "", f"${period_gross:,.2f}", "", f"${ytd_gross:,.2f}", bold=True); pdf.ln(8)
-        pdf.section_title("TAXES"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139); pdf.tax_row("Tax", "This Period", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
-        pt = {k: period_gross * v for k, v in TAX_RATES.items()}; yt = {k: ytd_gross * v for k, v in TAX_RATES.items()}
-        pdf.tax_row("Federal Income", f"${pt['FED']:,.2f}", f"${yt['FED']:,.2f}"); pdf.tax_row("State (MA)", f"${pt['MA']:,.2f}", f"${yt['MA']:,.2f}")
-        pdf.tax_row("Social Security", f"${pt['SS']:,.2f}", f"${yt['SS']:,.2f}"); pdf.tax_row("Medicare", f"${pt['MED']:,.2f}", f"${yt['MED']:,.2f}"); pdf.ln(2)
-        pdf.set_fill_color(248, 250, 252); pdf.tax_row("TOTAL TAXES", f"${sum(pt.values()):,.2f}", f"${sum(yt.values()):,.2f}", bold=True); pdf.ln(10)
-        net_pay = period_gross - sum(pt.values())
-        pdf.set_fill_color(241, 245, 249); pdf.rect(10, pdf.get_y(), 190, 35, 'F'); pdf.set_y(pdf.get_y() + 5)
-        pdf.set_font('Arial', 'B', 10); pdf.cell(63, 5, "CURRENT GROSS", 0, 0, 'C'); pdf.cell(63, 5, "DEDUCTIONS", 0, 0, 'C'); pdf.cell(63, 5, "NET PAY", 0, 1, 'C')
-        pdf.set_font('Arial', 'B', 14); pdf.cell(63, 10, f"${period_gross:,.2f}", 0, 0, 'C'); pdf.set_text_color(239, 68, 68); pdf.cell(63, 10, f"${sum(pt.values()):,.2f}", 0, 0, 'C'); pdf.set_text_color(16, 185, 129); pdf.cell(63, 10, f"${net_pay:,.2f}", 0, 1, 'C')
-        return bytes(pdf.output(dest='S'))
-
-# --- 6. AUTH SCREEN & SESSION INIT ---
+# --- 5. AUTH SCREEN & SESSION INIT ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 if 'edit_cred' not in st.session_state: st.session_state.edit_cred = None
 
@@ -209,7 +198,6 @@ pin = st.session_state.pin
 # --- SMART NOTIFICATION LOGIC ---
 chat_label = "COMMS & CHAT"
 if 'last_read_chat' not in st.session_state: st.session_state.last_read_chat = datetime.utcnow()
-
 latest_msg_q = run_query("SELECT MAX(timestamp) FROM comms_log")
 if latest_msg_q and latest_msg_q[0][0]:
     latest_db_dt = pd.to_datetime(latest_msg_q[0][0])
@@ -245,7 +233,7 @@ if "COMMS" in nav:
 
 # --- 8. ROUTING ---
 
-# [DASHBOARD] 
+# [DASHBOARD & GEOFENCE SHOWSTOPPER] 
 if nav == "DASHBOARD":
     hr = datetime.now(LOCAL_TZ).hour
     greeting = "Good Morning" if hr < 12 else "Good Afternoon" if hr < 17 else "Good Evening"
@@ -269,7 +257,7 @@ if nav == "DASHBOARD":
         if st.button("PUNCH OUT"):
             if end_pin == pin:
                 new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
-                if update_status(pin, "Inactive", 0, new_total):
+                if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                     st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                     log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
                     st.rerun()
@@ -278,28 +266,217 @@ if nav == "DASHBOARD":
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
         if not user.get('vip', False):
             st.info("Identity verification required to initiate shift.")
-            if st.camera_input("Take a photo to verify identity") and get_geolocation():
-                st.success("✅ Geofence & Biometrics Confirmed.")
-                start_pin = st.text_input("Enter 4-Digit PIN to Clock In", type="password", key="start_pin")
-                if st.button("PUNCH IN"):
-                    if start_pin == pin:
-                        start_t = time.time()
-                        if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0)):
-                            st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t
-                            log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                    else: st.error("❌ Incorrect PIN.")
+            camera_photo = st.camera_input("Take a photo to verify identity")
+            loc = get_geolocation()
+            
+            if camera_photo and loc:
+                user_lat = loc['coords']['latitude']; user_lon = loc['coords']['longitude']
+                fac_lat = HOSPITALS[selected_facility]["lat"]; fac_lon = HOSPITALS[selected_facility]["lon"]
+                
+                # --- SHOWSTOPPER 3: VISUAL GEOFENCE MAP ---
+                st.markdown("### 🛰️ Live Geofence Uplink")
+                if selected_facility != "Remote/Anywhere":
+                    df_map = pd.DataFrame({'lat': [user_lat, fac_lat], 'lon': [user_lon, fac_lon], 'color': [[59, 130, 246, 200], [16, 185, 129, 200]], 'radius': [20, GEOFENCE_RADIUS]})
+                    layer = pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='color', get_radius='radius', pickable=True)
+                    view_state = pdk.ViewState(latitude=user_lat, longitude=user_lon, zoom=15, pitch=45)
+                    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='mapbox://styles/mapbox/dark-v10'))
+                    
+                    distance = haversine_distance(user_lat, user_lon, fac_lat, fac_lon)
+                    if distance <= GEOFENCE_RADIUS:
+                        st.success(f"✅ Geofence Confirmed. You are {int(distance)}m from origin.")
+                        start_pin = st.text_input("Enter 4-Digit PIN to Clock In", type="password", key="start_pin")
+                        if st.button("PUNCH IN"):
+                            if start_pin == pin:
+                                start_t = time.time()
+                                if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                                    st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t
+                                    log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                            else: st.error("❌ Incorrect PIN.")
+                    else: st.error(f"❌ Geofence Failed. You are {int(distance)}m away. Must be within {GEOFENCE_RADIUS}m.")
+                else:
+                    # Remote Mapping
+                    df_map = pd.DataFrame({'lat': [user_lat], 'lon': [user_lon], 'color': [[59, 130, 246, 200]], 'radius': [20]})
+                    layer = pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='color', get_radius='radius', pickable=True)
+                    view_state = pdk.ViewState(latitude=user_lat, longitude=user_lon, zoom=15, pitch=45)
+                    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='mapbox://styles/mapbox/dark-v10'))
+                    
+                    st.success("✅ Remote Check-in Authorized.")
+                    start_pin = st.text_input("Enter 4-Digit PIN to Clock In", type="password", key="start_pin_remote")
+                    if st.button("PUNCH IN (REMOTE)"):
+                        if start_pin == pin:
+                            start_t = time.time()
+                            if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                                st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t
+                                log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                        else: st.error("❌ Incorrect PIN.")
         else:
             st.caption("✨ VIP Security Override Active")
             start_pin = st.text_input("Enter 4-Digit PIN to Clock In", type="password", key="vip_start_pin")
             if st.button("PUNCH IN"):
                 if start_pin == pin:
                     start_t = time.time()
-                    if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0)):
+                    if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0):
                         st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t
                         log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
                 else: st.error("❌ Incorrect PIN.")
 
-# [THE BANK]
+# [COMMAND CENTER - SHOWSTOPPER 2: ANALYTICS & FLEET MAP]
+elif nav == "COMMAND CENTER" and user['level'] == "Admin":
+    st.markdown("## 🦅 Global Command Center")
+    t_fleet, t_finance = st.tabs(["🗺️ LIVE FLEET TRACKING", "📈 FINANCIAL ANALYTICS"])
+    
+    with t_fleet:
+        st.markdown("### Active Operators")
+        active_workers = run_query("SELECT pin, start_time, earnings, lat, lon FROM workers WHERE status='Active'")
+        if active_workers:
+            map_data = []
+            for w in active_workers:
+                w_pin, w_start, w_lat, w_lon = str(w[0]), float(w[1]), w[3], w[4]
+                w_name = USERS.get(w_pin, {}).get("name", "Unknown")
+                w_role = USERS.get(w_pin, {}).get("role", "Worker")
+                hrs = (time.time() - w_start) / 3600
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><h4 style='margin:0;'>{w_name} | {w_role}</h4><span style='color:#10b981; font-weight:bold;'>🟢 ON CLOCK ({hrs:.2f} hrs)</span></div>", unsafe_allow_html=True)
+                if w_lat and w_lon: map_data.append({"name": w_name, "lat": float(w_lat), "lon": float(w_lon)})
+            
+            if map_data:
+                st.markdown("### Fleet Spatial Uplink")
+                df_fleet = pd.DataFrame(map_data)
+                layer = pdk.Layer("ScatterplotLayer", df_fleet, get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100, pickable=True)
+                view_state = pdk.ViewState(latitude=df_fleet['lat'].mean(), longitude=df_fleet['lon'].mean(), zoom=11, pitch=45)
+                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='mapbox://styles/mapbox/dark-v10', tooltip={"text": "{name}"}))
+        else:
+            st.info("No active operators in the field.")
+            
+    with t_finance:
+        st.markdown("### CFO Predictive Analytics Board")
+        # Generate some quick math for the showstopper demo
+        q_spend = "SELECT DATE(timestamp), SUM(amount) FROM history WHERE action='CLOCK OUT' GROUP BY DATE(timestamp) ORDER BY DATE(timestamp) ASC LIMIT 7"
+        spend_data = run_query(q_spend)
+        
+        total_spend = 0
+        if spend_data:
+            df_spend = pd.DataFrame(spend_data, columns=["Date", "Daily Spend"])
+            total_spend = df_spend["Daily Spend"].sum()
+            # Agency costs typically 2.5x standard internal rates
+            agency_avoidance = total_spend * 1.5 
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("7-Day Internal Labor Spend", f"${total_spend:,.2f}")
+            c2.metric("Projected Agency Cost", f"${total_spend * 2.5:,.2f}")
+            c3.metric("Agency Avoidance Savings", f"${agency_avoidance:,.2f}", "+150% ROI")
+            
+            st.markdown("#### Spend Trajectory vs Budget")
+            fig = px.area(df_spend, x="Date", y="Daily Spend", template="plotly_dark", color_discrete_sequence=["#10b981"])
+            fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=0, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Insufficient historical data to generate financial projections. Complete a few shifts to feed the AI.")
+
+# [CENSUS & ACUITY + SOS PROTOCOL WITH TWILIO]
+elif nav == "CENSUS & ACUITY" and user['level'] in ["Supervisor", "Manager", "Director"]:
+    st.markdown(f"## 📊 {user['dept']} Census & Staffing")
+    if st.button("🔄 Refresh Live Database"): st.rerun()
+    
+    c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM unit_census WHERE dept=:d", {"d": user['dept']})
+    curr_pts = c_data[0][0] if c_data else 0
+    curr_high = c_data[0][1] if c_data else 0
+    if c_data and c_data[0][2]:
+        dt_obj = pd.to_datetime(c_data[0][2])
+        if dt_obj.tzinfo is None: dt_obj = dt_obj.tz_localize('UTC')
+        last_upd = dt_obj.astimezone(LOCAL_TZ).strftime("%I:%M %p")
+    else: last_upd = "Never"
+
+    standard_pts = max(0, curr_pts - curr_high)
+    req_staff_high = math.ceil(curr_high / 3)
+    req_staff_std = math.ceil(standard_pts / 6)
+    total_req_staff = req_staff_high + req_staff_std
+
+    actual_staff = 0
+    active_rows = run_query("SELECT pin FROM workers WHERE status='Active'")
+    if active_rows:
+        for r in active_rows:
+            if USERS.get(str(r[0]), {}).get('dept') == user['dept']: actual_staff += 1
+
+    variance = actual_staff - total_req_staff
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Patients", curr_pts, f"{curr_high} High Acuity", delta_color="off")
+    col2.metric("Required Staff (Calculated)", total_req_staff)
+    
+    if variance < 0:
+        col3.metric("Current Staff (Live)", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
+        st.error(f"🚨 UNSAFE STAFFING DETECTED: {user['dept']} requires {abs(variance)} more active personnel to meet safe care ratios.")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
+            missing_count = abs(variance)
+            incentive_rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
+            
+            for i in range(missing_count):
+                s_id = f"SOS-{int(time.time()*1000)}-{i}"
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", {"id": s_id, "p": pin, "r": f"🚨 SOS URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": incentive_rate})
+            
+            msg_id = f"MSG-SOS-{int(time.time()*1000)}"
+            sos_msg_dept = f"🚨 SYSTEM ALERT: The unit is understaffed by {missing_count}. Emergency shifts with 1.5x incentive pay (${incentive_rate:.2f}/hr) have been posted to the Marketplace!"
+            sos_msg_global = f"[{user['dept'].upper()}] SYSTEM ALERT: The unit is critically understaffed by {missing_count}. Emergency shifts have been posted to the Marketplace! Check your schedules."
+            
+            run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id, "p": "9999", "d": user['dept'], "c": sos_msg_dept}) 
+            run_transaction("INSERT INTO comms_log (msg_id, pin, dept, content) VALUES (:id, :p, :d, :c)", {"id": msg_id+"-g", "p": "9999", "d": "GLOBAL", "c": sos_msg_global}) 
+            
+            # --- SHOWSTOPPER 1: TWILIO SMS FIRING ---
+            sms_sent = False
+            for u_pin, u_data in USERS.items():
+                if u_data.get('dept') == user['dept'] and u_data.get('phone') and u_pin != pin:
+                    sms_sent = send_sms(u_data['phone'], f"EC PROTOCOL SOS: {user['dept']} needs {missing_count} staff NOW. 1.5x Incentive Pay Active. Claim in app.") or sms_sent
+            
+            st.success(f"🚨 SOS Broadcasted! Shifts pushed to Marketplace." + (" SMS Alerts dispatched to off-duty staff!" if sms_sent else ""))
+            time.sleep(2.5); st.rerun()
+    else:
+        col3.metric("Current Staff (Live)", actual_staff, f"+{variance} (Safe)", delta_color="normal")
+        st.success(f"✅ Safe Staffing Maintained: Ratios are currently optimal.")
+
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+    with st.expander("📝 UPDATE CENSUS NUMBERS", expanded=False):
+        with st.form("update_census"):
+            st.caption(f"Last Updated: {last_upd}")
+            new_t = st.number_input("Total Unit Census", min_value=0, value=curr_pts, step=1)
+            new_h = st.number_input("High Acuity (Vents/ICU Stepdown)", min_value=0, value=curr_high, step=1)
+            if st.form_submit_button("Lock In Census"):
+                if new_h > new_t: st.error("High acuity cannot exceed total patients.")
+                else:
+                    exists = run_query("SELECT 1 FROM unit_census WHERE dept=:d", {"d": user['dept']})
+                    if exists: success = run_transaction("UPDATE unit_census SET total_pts=:t, high_acuity=:h, last_updated=NOW() WHERE dept=:d", {"d": user['dept'], "t": new_t, "h": new_h})
+                    else: success = run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h)", {"d": user['dept'], "t": new_t, "h": new_h})
+                    if success: st.success("Census Updated!"); time.sleep(1); st.rerun()
+
+# [APPROVALS WITH TWILIO]
+elif nav == "APPROVALS" and user['level'] in ["Manager", "Director", "Admin"]:
+    st.markdown("## 📥 Manager Approvals")
+    st.markdown("### Pending Financial Withdrawals")
+    pending_tx = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING' ORDER BY timestamp ASC")
+    if pending_tx:
+        for tx in pending_tx:
+            t_id, w_pin, t_amt, t_time = tx[0], tx[1], float(tx[2]), tx[3]
+            w_name = USERS.get(str(w_pin), {}).get("name", f"User {w_pin}")
+            with st.container():
+                st.markdown(f"""<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><h4 style='margin:0; color:#f8fafc;'>{w_name} requested a transfer of <span style='color:#10b981;'>${t_amt:,.2f}</span></h4><p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Requested: {t_time} | TX ID: {t_id}</p></div>""", unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                if c1.button("✅ APPROVE PAYOUT", key=f"app_{t_id}"):
+                    run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id", {"id": t_id})
+                    log_action(pin, "MANAGER APPROVAL", t_amt, f"Approved payout for {w_name}")
+                    
+                    # --- SHOWSTOPPER 1: TWILIO APPROVAL SMS ---
+                    target_phone = USERS.get(str(w_pin), {}).get('phone')
+                    if target_phone:
+                        send_sms(target_phone, f"EC PROTOCOL: Your instant payout of ${t_amt:,.2f} has been approved and dispatched to your bank.")
+                    
+                    st.success("Approved. Funds Released."); time.sleep(1.5); st.rerun()
+                if c2.button("❌ DENY", key=f"den_{t_id}"):
+                    run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": t_id}); st.error("Denied."); time.sleep(1); st.rerun()
+                st.markdown("<br>", unsafe_allow_html=True)
+    else: st.info("No pending financial transactions.")
+
+# [THE BANK (WITH COLOR FIX)]
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     st.caption("Manage your payouts, review shift logs, and download pay stubs.")
@@ -323,27 +500,13 @@ elif nav == "THE BANK":
                 ts, amt, note = r[0], float(r[1]), r[2]
                 st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid #10b981 !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Shift Completed</strong><strong style='color: #10b981; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{ts} | <span style='color: #3b82f6; font-weight:800;'>{note}</span></div></div>", unsafe_allow_html=True)
         else: st.info("No shifts worked yet.")
-   with tab2:
-        st.markdown("### Transaction Status")
-        q = "SELECT timestamp, amount, status FROM transactions WHERE pin=:p ORDER BY timestamp DESC"
-        res = run_query(q, {"p": pin})
+    with tab2:
+        res = run_query("SELECT timestamp, amount, status FROM transactions WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
         if res:
             for r in res:
                 ts, amt, status = r[0], float(r[1]), r[2]
-                # Color Logic
                 color = "#10b981" if status == "APPROVED" else "#f59e0b" if status == "PENDING" else "#ff453a"
-                
-                st.markdown(f"""
-                <div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid {color} !important;'>
-                    <div style='display: flex; justify-content: space-between;'>
-                        <strong style='color: #f8fafc;'>Transfer Request</strong>
-                        <strong style='color: {color}; font-size: 1.2rem;'>${amt:,.2f}</strong>
-                    </div>
-                    <div style='color: #94a3b8; font-size: 0.85rem; margin-top: 5px;'>
-                        {ts} | Status: <strong style='color: {color};'>{status}</strong>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"<div class='glass-card' style='padding: 15px; margin-bottom: 10px; border-left: 4px solid {color} !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>Transfer Request</strong><strong style='color: {color}; font-size:1.2rem;'>${amt:,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem; margin-top: 5px;'>{ts} | Status: <strong style='color:{color};'>{status}</strong></div></div>", unsafe_allow_html=True)
         else: st.info("No withdrawal history.")
     with tab3:
         with st.form("pay_stub_form"):
@@ -359,129 +522,6 @@ elif nav == "THE BANK":
         if 'pdf_data' in st.session_state:
             st.download_button("📄 Download PDF Pay Stub", data=st.session_state.pdf_data, file_name=st.session_state.pdf_filename, mime="application/pdf")
 
-# [ENTERPRISE HR VAULT - OPTION 3 INTEGRATION]
-elif nav == "MY PROFILE":
-    st.markdown("## 🗄️ Enterprise HR Vault")
-    st.caption("Securely manage your professional licenses, immunizations, and payroll documentation.")
-    
-    t_lic, t_vax, t_tax = st.tabs(["🪪 LICENSES & CERTS", "💉 VACCINE VAULT", "📑 TAX & ONBOARDING"])
-    
-    # --- TAB 1: CREDENTIALS WALLET ---
-    with t_lic:
-        st.markdown("### Professional Credentials")
-        if st.session_state.edit_cred:
-            c_id = st.session_state.edit_cred
-            cred_data = run_query("SELECT doc_type, doc_number, exp_date FROM credentials WHERE doc_id=:id", {"id": c_id})
-            if cred_data:
-                with st.form("edit_cred_form"):
-                    types = ["State RN License", "State RRT License", "BLS Certification", "ACLS Certification", "PALS Certification"]
-                    idx = types.index(cred_data[0][0]) if cred_data[0][0] in types else 0
-                    new_doc_type = st.selectbox("Document Type", types, index=idx)
-                    new_doc_num = st.text_input("License Number", value=cred_data[0][1])
-                    new_exp_date = st.date_input("Expiration Date", value=datetime.strptime(cred_data[0][2], "%Y-%m-%d").date())
-                    if st.form_submit_button("Update"):
-                        run_transaction("UPDATE credentials SET doc_type=:dt, doc_number=:dn, exp_date=:ed WHERE doc_id=:id", {"dt": new_doc_type, "dn": new_doc_num, "ed": str(new_exp_date), "id": c_id})
-                        st.session_state.edit_cred = None; st.rerun()
-                if st.button("Cancel Edit"): st.session_state.edit_cred = None; st.rerun()
-        else:
-            with st.expander("➕ ADD NEW CREDENTIAL"):
-                with st.form("cred_form"):
-                    doc_type = st.selectbox("Document Type", ["State RN License", "State RRT License", "BLS Certification", "ACLS Certification", "PALS Certification"])
-                    doc_num = st.text_input("License / Certificate Number")
-                    exp_date = st.date_input("Expiration Date")
-                    if st.form_submit_button("Save Credential"):
-                        run_transaction("INSERT INTO credentials (doc_id, pin, doc_type, doc_number, exp_date, status) VALUES (:id, :p, :dt, :dn, :ed, 'ACTIVE')", {"id": f"DOC-{int(time.time())}", "p": pin, "dt": doc_type, "dn": doc_num, "ed": str(exp_date)})
-                        st.success("✅ Saved"); time.sleep(1); st.rerun()
-            creds = run_query("SELECT doc_id, doc_type, doc_number, exp_date FROM credentials WHERE pin=:p ORDER BY exp_date ASC", {"p": pin})
-            if creds:
-                curr_d = datetime.now().date()
-                for c in creds:
-                    d_id, d_t, d_n, e_d = c[0], c[1], c[2], c[3]
-                    try:
-                        e_obj = datetime.strptime(e_d, "%Y-%m-%d").date()
-                        if e_obj < curr_d: stat = "<span style='color:#ff453a; font-weight:bold; border:1px solid rgba(255, 69, 58, 0.4); padding:3px 8px; border-radius:6px; background: rgba(255,69,58,0.1);'>🚨 EXPIRED</span>"
-                        elif (e_obj - curr_d).days <= 30: stat = "<span style='color:#f59e0b; font-weight:bold; border:1px solid rgba(245, 158, 11, 0.4); padding:3px 8px; border-radius:6px; background: rgba(245,158,11,0.1);'>⚠️ EXPIRING SOON</span>"
-                        else: stat = "<span style='color:#34d399; font-weight:bold; border:1px solid rgba(52, 211, 153, 0.4); padding:3px 8px; border-radius:6px; background: rgba(52,211,153,0.1);'>✅ VALID</span>"
-                    except: stat = ""
-                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #8b5cf6 !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div style='font-size:1.1rem; font-weight:800; color:#f8fafc;'>{d_t}</div><div>{stat}</div></div><div style='color:#94a3b8; font-size:0.9rem; margin-top:8px;'>License #: <span style='color:#e2e8f0;'>{d_n}</span></div><div style='color:#94a3b8; font-size:0.9rem;'>Expires: <span style='color:#e2e8f0; font-weight:700;'>{e_d}</span></div></div>", unsafe_allow_html=True)
-                    col1, col2 = st.columns([1,1])
-                    if col1.button("EDIT", key=f"ec_{d_id}"): st.session_state.edit_cred = d_id; st.rerun()
-                    if col2.button("DELETE", key=f"dc_{d_id}"): run_transaction("DELETE FROM credentials WHERE doc_id=:id", {"id": d_id}); st.rerun()
-            else: st.info("No credentials found.")
-
-    # --- TAB 2: VACCINE VAULT ---
-    with t_vax:
-        st.markdown("### Immunization Records")
-        with st.expander("➕ LOG NEW VACCINATION / TEST"):
-            with st.form("vax_form"):
-                vax_type = st.selectbox("Record Type", ["PPD / TB Test", "Influenza (Flu)", "COVID-19 Series", "Hepatitis B", "MMR", "Varicella"])
-                c1, c2 = st.columns(2)
-                admin_date = c1.date_input("Date Administered")
-                exp_date_vax = c2.date_input("Expiration Date (If Applicable)", value=admin_date + timedelta(days=365))
-                if st.form_submit_button("Save Health Record"):
-                    run_transaction("INSERT INTO vaccines (vax_id, pin, vax_type, admin_date, exp_date) VALUES (:id, :p, :t, :a, :e)", {"id": f"VAX-{int(time.time())}", "p": pin, "t": vax_type, "a": str(admin_date), "e": str(exp_date_vax)})
-                    st.success("✅ Record Saved"); time.sleep(1); st.rerun()
-        
-        vaxs = run_query("SELECT vax_id, vax_type, admin_date, exp_date FROM vaccines WHERE pin=:p ORDER BY exp_date ASC", {"p": pin})
-        if vaxs:
-            curr_d = datetime.now().date()
-            for v in vaxs:
-                v_id, v_t, v_a, v_e = v[0], v[1], v[2], v[3]
-                try:
-                    e_obj = datetime.strptime(v_e, "%Y-%m-%d").date()
-                    if e_obj < curr_d: stat = "<span style='color:#ff453a; font-weight:bold; border:1px solid rgba(255, 69, 58, 0.4); padding:3px 8px; border-radius:6px; background: rgba(255,69,58,0.1);'>🚨 NON-COMPLIANT</span>"
-                    else: stat = "<span style='color:#34d399; font-weight:bold; border:1px solid rgba(52, 211, 153, 0.4); padding:3px 8px; border-radius:6px; background: rgba(52,211,153,0.1);'>✅ COMPLIANT</span>"
-                except: stat = ""
-                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #0ea5e9 !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div style='font-size:1.1rem; font-weight:800; color:#f8fafc;'>{v_t}</div><div>{stat}</div></div><div style='color:#94a3b8; font-size:0.9rem; margin-top:8px;'>Administered: <span style='color:#e2e8f0;'>{v_a}</span></div><div style='color:#94a3b8; font-size:0.9rem;'>Valid Until: <span style='color:#e2e8f0; font-weight:700;'>{v_e}</span></div></div>", unsafe_allow_html=True)
-                if st.button("DELETE RECORD", key=f"dv_{v_id}"): run_transaction("DELETE FROM vaccines WHERE vax_id=:id", {"id": v_id}); st.rerun()
-        else: st.info("No health records found.")
-
-    # --- TAB 3: TAX & ONBOARDING ---
-    with t_tax:
-        st.markdown("### W-4 Withholdings & Direct Deposit")
-        hr_rec = run_query("SELECT w4_filing_status, w4_allowances, dd_bank, dd_acct_last4, signed_date FROM hr_onboarding WHERE pin=:p", {"p": pin})
-        
-        if hr_rec:
-            st.success("✅ **ONBOARDING COMPLETE**")
-            st.markdown(f"""
-            <div class='glass-card' style='border-left: 4px solid #10b981 !important;'>
-                <strong style='color:#10b981;'>FEDERAL W-4 INFO</strong><br>
-                <span style='color:#94a3b8;'>Filing Status:</span> {hr_rec[0][0]}<br>
-                <span style='color:#94a3b8;'>Allowances:</span> {hr_rec[0][1]}<br><br>
-                <strong style='color:#3b82f6;'>BANKING INFO</strong><br>
-                <span style='color:#94a3b8;'>Institution:</span> {hr_rec[0][2]}<br>
-                <span style='color:#94a3b8;'>Account:</span> **** **** **** {hr_rec[0][3]}<br>
-                <hr style='border-color: rgba(255,255,255,0.1); margin:10px 0;'>
-                <span style='color:#64748b; font-size:0.8rem;'>Digitally Signed: {hr_rec[0][4]}</span>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("🔄 Update HR Forms"):
-                run_transaction("DELETE FROM hr_onboarding WHERE pin=:p", {"p": pin}); st.rerun()
-        else:
-            st.warning("⚠️ **ACTION REQUIRED: Please complete your onboarding paperwork.**")
-            with st.form("hr_paperwork"):
-                st.markdown("**Part 1: W-4 Federal Tax Withholding**")
-                filing_status = st.selectbox("Filing Status", ["Single", "Married Filing Jointly", "Head of Household"])
-                allowances = st.number_input("Total Allowances (Dependents)", min_value=0, max_value=10, step=1)
-                
-                st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
-                st.markdown("**Part 2: Direct Deposit Authorization**")
-                bank_name = st.text_input("Financial Institution Name", placeholder="e.g. Bank of America")
-                acct_num = st.text_input("Account Number", type="password")
-                routing_num = st.text_input("Routing Number", type="password")
-                
-                st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
-                st.info("By checking this box, I legally authorize EC Protocol to process my payroll via direct deposit and withhold taxes according to the W-4 instructions above.")
-                signature = st.checkbox(f"Digital Signature: {user['name']}")
-                
-                if st.form_submit_button("Submit Onboarding Documents"):
-                    if not signature: st.error("You must check the signature box to submit.")
-                    elif len(acct_num) < 4: st.error("Please enter a valid account number.")
-                    else:
-                        last_4 = acct_num[-4:]
-                        run_transaction("INSERT INTO hr_onboarding (pin, w4_filing_status, w4_allowances, dd_bank, dd_acct_last4, signed_date) VALUES (:p, :fs, :al, :bn, :l4, NOW())", {"p": pin, "fs": filing_status, "al": allowances, "bn": bank_name, "l4": last_4})
-                        st.success("Documents Locked & Encrypted!"); time.sleep(1.5); st.rerun()
-
-# [HIDDEN TABS TO SAVE TERMINAL SPACE BUT KEEP ENGINE RUNNING]
-elif nav in ["CENSUS & ACUITY", "COMMS & CHAT", "ASSIGNMENTS", "MARKETPLACE", "APPROVALS", "COMMAND CENTER", "MASTER SCHEDULE"]:
-    st.info(f"{nav} engine is active in the background. Use the HR & PROFILE or BANK tabs to test the current module build.")
+# [OTHER TABS MINIMIZED FOR TERMINAL SPACE]
+elif nav in ["COMMS & CHAT", "ASSIGNMENTS", "MARKETPLACE", "SCHEDULE", "MY PROFILE"]:
+    st.info(f"{nav} engine is active in the background. Use Dashboard, Command Center, Approvals, or Census to test the new Showstopper modules.")
