@@ -40,23 +40,26 @@ def send_sms(to_phone, message_body):
     return False, "Twilio inactive."
 
 # --- 1. CONFIGURATION & STABLE CSS OVERHAUL ---
-st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
     
-    /* Safely hide the deploy tools but keep the native header functional */
+    /* COMPLETELY DISABLE AND HIDE THE SIDEBAR AND TOGGLE BUTTON */
+    [data-testid="stSidebar"] { display: none !important; }
+    [data-testid="collapsedControl"] { display: none !important; }
     #MainMenu {visibility: hidden;} 
     footer {visibility: hidden;} 
     [data-testid="stToolbar"] {visibility: hidden !important;} 
     header {background: transparent !important;}
     
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
+    .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
     
-    /* Floating Custom Header - Safe from the toggle button */
-    .custom-header-pill { background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 25px; border: 1px solid rgba(255,255,255,0.08); margin-bottom: 25px; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
+    /* Floating Custom Header */
+    .custom-header-pill { background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 25px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
     
     /* Glass Cards & Metrics */
     div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); }
@@ -66,6 +69,9 @@ html_style = """
     /* Buttons */
     .stButton>button { width: 100%; height: 55px; border-radius: 12px; font-weight: 700; font-size: 1rem; border: none; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); letter-spacing: 0.5px; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
+    
+    /* Horizontal Radio Tabs Styling to look like an app menu */
+    div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
     
     /* Bounty Cards */
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(245, 158, 11, 0.3); border-left: 5px solid #f59e0b; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
@@ -290,28 +296,34 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 6. CUSTOM HEADER (SAFE FROM TOGGLE) ---
-st.markdown(f"""
-<div class='custom-header-pill'>
-    <div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'>
-        <span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> EC PROTOCOL
+# --- 6. TOP NAVIGATION AND HEADER (NO SIDEBAR) ---
+c1, c2 = st.columns([8, 2])
+with c1:
+    st.markdown(f"""
+    <div class='custom-header-pill'>
+        <div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'>
+            <span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> EC PROTOCOL
+        </div>
+        <div style='text-align:right;'>
+            <div style='font-size:0.95rem; font-weight:800; color:#f8fafc;'>{user['name']}</div>
+            <div style='font-size:0.75rem; color:#38bdf8; text-transform:uppercase; letter-spacing:1px;'>{user['role']} | {user['dept']}</div>
+        </div>
     </div>
-    <div style='text-align:right;'>
-        <div style='font-size:0.95rem; font-weight:800; color:#f8fafc;'>{user['name']}</div>
-        <div style='font-size:0.75rem; color:#38bdf8; text-transform:uppercase; letter-spacing:1px;'>{user['role']} | {user['dept']}</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+with c2:
+    st.markdown("<br>", unsafe_allow_html=True) # spacing alignment
+    if st.button("🚪 LOGOUT"):
+        st.session_state.clear()
+        st.rerun()
 
-# --- 7. SIDEBAR NAVIGATION ---
-with st.sidebar:
-    if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
-    elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
-    else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
-        
-    nav = st.radio("MAIN NAVIGATION", menu_items, label_visibility="collapsed")
-    st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
-    if st.button("SECURE LOGOUT"): st.session_state.clear(); st.rerun()
+# Define tabs based on user level
+if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
+elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
+else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+
+st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
+st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
 
 # --- 8. MASTER ROUTING ---
 
@@ -383,8 +395,8 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
 
 elif nav == "COMMAND CENTER" and user['level'] == "Admin":
-    st.markdown("## 🦅 Executive Command Center")
     if st.button("🔄 Refresh Data Link"): st.rerun()
+    st.markdown("## 🦅 Executive Command Center")
     t_finance, t_fleet = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING"])
     with t_finance:
         raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
@@ -741,7 +753,7 @@ elif nav == "MY PROFILE":
             new_pw = st.text_input("New Password", type="password")
             confirm_pw = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password"):
-                db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
+                db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": pin})
                 active_password = db_pw_res[0][0] if db_pw_res else USERS[pin]["password"]
                 if current_pw != active_password: st.error("❌ Current password incorrect.")
                 elif new_pw != confirm_pw: st.error("❌ New passwords do not match.")
