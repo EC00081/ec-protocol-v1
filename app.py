@@ -39,53 +39,55 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
-# --- 1. CONFIGURATION & CSS OVERHAUL ---
+# --- 1. CONFIGURATION & STABLE CSS OVERHAUL ---
 st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
-    p, h1, h2, h3, h4, h5, h6, div, label, button, input, select, textarea { font-family: 'Inter', sans-serif !important; }
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+    
+    /* Safely hide the deploy tools but keep the native header functional */
+    #MainMenu {visibility: hidden;} 
+    footer {visibility: hidden;} 
+    [data-testid="stToolbar"] {visibility: hidden !important;} 
+    header {background: transparent !important;}
     
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} 
-    header {background: transparent !important; z-index: 1000 !important;} 
-    [data-testid="stToolbar"] {display: none !important;} 
-    .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
     
-    /* ELEVATE THE SIDEBAR TOGGLE BUTTON ABOVE ALL OTHER UI ELEMENTS */
-    [data-testid="collapsedControl"] { z-index: 999999 !important; }
+    /* Floating Custom Header - Safe from the toggle button */
+    .custom-header-pill { background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 25px; border: 1px solid rgba(255,255,255,0.08); margin-bottom: 25px; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
     
-    .sticky-header { position: sticky; top: 0; z-index: 998; background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 20px 15px 60px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-top: -1rem; margin-bottom: 25px; border-radius: 0 0 16px 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
-    
-    div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); margin-bottom: 15px; }
+    /* Glass Cards & Metrics */
+    div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); }
     div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 2rem; font-weight: 800; }
     
+    /* Buttons */
     .stButton>button { width: 100%; height: 55px; border-radius: 12px; font-weight: 700; font-size: 1rem; border: none; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); letter-spacing: 0.5px; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
     
+    /* Bounty Cards */
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(245, 158, 11, 0.3); border-left: 5px solid #f59e0b; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
-    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(245, 158, 11, 0.6); border-left: 5px solid #f59e0b; }
+    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(245, 158, 11, 0.6); }
     .bounty-card::before { content: '⚡ SURGE ACTIVE'; position: absolute; top: 18px; right: -35px; background: #f59e0b; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #10b981; margin: 10px 0; text-shadow: 0 0 25px rgba(16, 185, 129, 0.2); letter-spacing: -1px; }
     
+    /* Empty States & FinTech */
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
     
-    .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; letter-spacing: 1px; }
+    /* Schedule Rows */
+    .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
     .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
     .sched-time { color: #34d399; font-weight: 800; min-width: 100px; font-size: 1rem; }
 
     @media (max-width: 768px) {
         .sched-row { flex-direction: column; align-items: flex-start; }
         .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; }
-        div[data-testid="metric-container"] { padding: 15px; }
         div[data-testid="stMetricValue"] { font-size: 1.5rem !important; }
         .bounty-amount { font-size: 2.2rem; }
-        /* PHYSICALLY MOVE CUSTOM HEADER SO IT DOES NOT BLOCK THE TOGGLE BUTTON */
-        .sticky-header { padding: 15px !important; margin-left: 50px !important; }
     }
 </style>
 """
@@ -288,9 +290,9 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 6. CUSTOM STICKY HEADER ---
+# --- 6. CUSTOM HEADER (SAFE FROM TOGGLE) ---
 st.markdown(f"""
-<div class='sticky-header'>
+<div class='custom-header-pill'>
     <div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'>
         <span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> EC PROTOCOL
     </div>
@@ -301,9 +303,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# --- 7. SIDEBAR NAVIGATION ---
 with st.sidebar:
-    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True) 
-    
     if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
     elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
     else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
@@ -316,6 +317,8 @@ with st.sidebar:
 
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh Dashboard"): st.rerun()
+    
     if user['level'] in ["Manager", "Director"]:
         active_count = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")[0][0] if run_query("SELECT COUNT(*) FROM workers WHERE status='Active'") else 0
         shifts_count = run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'")[0][0] if run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'") else 0
@@ -380,8 +383,8 @@ if nav == "DASHBOARD":
                     st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
 
 elif nav == "COMMAND CENTER" and user['level'] == "Admin":
-    if st.button("🔄 Refresh Data Link"): st.rerun()
     st.markdown("## 🦅 Executive Command Center")
+    if st.button("🔄 Refresh Data Link"): st.rerun()
     t_finance, t_fleet = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING"])
     with t_finance:
         raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
@@ -422,8 +425,10 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                 st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", df_fleet, get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100)], initial_view_state=pdk.ViewState(latitude=df_fleet['lat'].mean(), longitude=df_fleet['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
         else: st.info("No active operators in the field.")
 
-elif nav == "FINANCIAL FORECAST":
+elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
     st.markdown("## 📊 Predictive Payroll Outflow")
+    if st.button("🔄 Refresh Forecast"): st.rerun()
+    
     scheds = run_query("SELECT pin FROM schedules WHERE status='SCHEDULED'")
     base_outflow = sum((USERS.get(str(s[0]), {}).get('rate', 0.0) * 12) for s in scheds) if scheds else 0.0
     open_markets = run_query("SELECT rate FROM marketplace WHERE status='OPEN'")
@@ -495,6 +500,8 @@ elif nav == "CENSUS & ACUITY":
 
 elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
+    if st.button("🔄 Refresh Queue"): st.rerun()
+    
     if user['level'] == "Admin":
         st.markdown("### Stage 2: Treasury Release (CFO Verification)")
         pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
@@ -532,6 +539,8 @@ elif nav == "APPROVALS":
 
 elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh Market"): st.rerun()
+    
     st.caption("Active surge bounties. Claim critical shifts instantly. Rates reflect 1.5x incentive multipliers.")
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -564,6 +573,8 @@ elif nav == "MARKETPLACE":
 
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
+    if st.button("🔄 Refresh Schedule"): st.rerun()
+    
     if user['level'] in ["Manager", "Director", "Admin"]: tab_mine, tab_hist, tab_master, tab_ai = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER"])
     else: tab_mine, tab_hist, tab_master = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER"])
         
@@ -639,6 +650,8 @@ elif nav == "SCHEDULE":
 
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
+    if st.button("🔄 Refresh Bank Ledger"): st.rerun()
+    
     bank_info = run_query("SELECT dd_bank, dd_acct_last4 FROM hr_onboarding WHERE pin=:p", {"p": pin})
     has_bank = bank_info and bank_info[0][0] and bank_info[0][1]
     
@@ -718,6 +731,7 @@ elif nav == "THE BANK":
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
     if st.button("🔄 Refresh HR Profile"): st.rerun()
+    
     t_lic, t_vax, t_tax, t_pto, t_sec = st.tabs(["🪪 LICENSES", "💉 VACCINES", "📑 ONBOARDING", "🏝️ TIME OFF", "🔐 SECURITY"])
     
     with t_sec:
@@ -727,7 +741,7 @@ elif nav == "MY PROFILE":
             new_pw = st.text_input("New Password", type="password")
             confirm_pw = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password"):
-                db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": pin})
+                db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
                 active_password = db_pw_res[0][0] if db_pw_res else USERS[pin]["password"]
                 if current_pw != active_password: st.error("❌ Current password incorrect.")
                 elif new_pw != confirm_pw: st.error("❌ New passwords do not match.")
