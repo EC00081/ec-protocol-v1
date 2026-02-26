@@ -49,9 +49,12 @@ html_style = """
     
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} 
-    header {background: transparent !important;} 
+    header {background: transparent !important; z-index: 1000 !important;} 
     [data-testid="stToolbar"] {display: none !important;} 
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
+    
+    /* ELEVATE THE SIDEBAR TOGGLE BUTTON ABOVE ALL OTHER UI ELEMENTS */
+    [data-testid="collapsedControl"] { z-index: 999999 !important; }
     
     .sticky-header { position: sticky; top: 0; z-index: 998; background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 20px 15px 60px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-top: -1rem; margin-bottom: 25px; border-radius: 0 0 16px 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
     
@@ -81,7 +84,8 @@ html_style = """
         div[data-testid="metric-container"] { padding: 15px; }
         div[data-testid="stMetricValue"] { font-size: 1.5rem !important; }
         .bounty-amount { font-size: 2.2rem; }
-        .sticky-header { padding: 15px 15px 15px 60px !important; }
+        /* PHYSICALLY MOVE CUSTOM HEADER SO IT DOES NOT BLOCK THE TOGGLE BUTTON */
+        .sticky-header { padding: 15px !important; margin-left: 50px !important; }
     }
 </style>
 """
