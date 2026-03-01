@@ -37,9 +37,7 @@ except ImportError: TWILIO_ACTIVE = False
 
 def send_sms(to_phone, message_body):
     if TWILIO_ACTIVE and to_phone:
-        raw_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-        raw_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-        raw_from = os.environ.get("TWILIO_PHONE_NUMBER", "")
+        raw_sid, raw_token, raw_from = os.environ.get("TWILIO_ACCOUNT_SID", ""), os.environ.get("TWILIO_AUTH_TOKEN", ""), os.environ.get("TWILIO_PHONE_NUMBER", "")
         if not raw_sid or not raw_token or not raw_from: return False, "Missing Env Vars."
         try:
             client = Client(raw_sid.strip(), raw_token.strip())
@@ -49,18 +47,75 @@ def send_sms(to_phone, message_body):
     return False, "Twilio inactive."
 
 # --- CRYPTO & ZK PROOFS ---
-def hash_password(plain_text_password):
-    return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
+def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
     except ValueError: return False
-
 def generate_zk_commitment(doc_number, pin):
     salt = os.environ.get("ZK_SECRET_SALT", "EC_PROTOCOL_ENTERPRISE_SALT")
     return hashlib.sha256(f"{doc_number}-{pin}-{salt}".encode('utf-8')).hexdigest()
 
-# --- WEB3: ESCROW & SPLIT SETTLEMENT ---
+# --- DATABASE ENGINE ---
+@st.cache_resource
+def get_db_engine():
+    url = os.environ.get("SUPABASE_URL")
+    if not url:
+        try: url = st.secrets["SUPABASE_URL"]
+        except: pass
+    if not url: return None
+    if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
+    try:
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
+            try: conn.execute(text("ALTER TABLE marketplace ADD COLUMN escrow_status text;"))
+            except: pass
+            conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text);"))
+            try: conn.execute(text("ALTER TABLE transactions ADD COLUMN destination_pubkey text;"))
+            except: pass
+            try: conn.execute(text("ALTER TABLE transactions ADD COLUMN tx_type text;"))
+            except: pass
+            conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
+            try: conn.execute(text("ALTER TABLE hr_onboarding ADD COLUMN solana_pubkey text;"))
+            except: pass
+            conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS account_security (pin text PRIMARY KEY, password text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
+            # NEW: BLE Indoor Tracking Table
+            conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, last_seen timestamp DEFAULT NOW());"))
+            conn.commit()
+        return engine
+    except Exception as e: return None
+
+def run_query(query, params=None):
+    engine = get_db_engine()
+    if not engine: return None
+    try:
+        with engine.connect() as conn: return conn.execute(text(query), params or {}).fetchall()
+    except Exception as e: return None
+
+def run_transaction(query, params=None):
+    engine = get_db_engine()
+    if not engine: return False
+    try:
+        with engine.connect() as conn: 
+            conn.execute(text(query), params or {})
+            conn.commit()
+            return True
+    except Exception as e: return False
+
+def log_action(pin, action, amount, note): run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
+def update_status(pin, status, start, earn, lat=0.0, lon=0.0): q = "INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;"; return run_transaction(q, {"p": pin, "s": status, "t": start, "e": earn, "lat": lat, "lon": lon})
+def haversine_distance(lat1, lon1, lat2, lon2): R = 6371000; phi1, phi2 = math.radians(lat1), math.radians(lat2); dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1); a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2; return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+def force_cloud_sync(pin):
+    rows = run_query("SELECT status, start_time, earnings FROM workers WHERE pin = :pin", {"pin": pin})
+    if rows and len(rows) > 0: st.session_state.user_state['active'] = (rows[0][0].lower() == 'active'); st.session_state.user_state['start_time'] = float(rows[0][1]) if rows[0][1] else 0.0; st.session_state.user_state['earnings'] = float(rows[0][2]) if rows[0][2] else 0.0; return True
+    st.session_state.user_state['active'] = False; return False
+# --- WEB3 & CYBER-PHYSICAL PROTOCOLS ---
 def lock_escrow_bounty(shift_id, rate, hours=12):
     run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
     return True
@@ -70,18 +125,61 @@ def release_escrow_bounty(shift_id, pin, user_pubkey):
     return True
 
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
-    """Executes an atomic transaction splitting Net Pay to worker and Tax to Treasury."""
     TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
-    tax_rate = sum(TAX_RATES.values())
-    tax_withheld = gross_amount * tax_rate
+    tax_withheld = gross_amount * sum(TAX_RATES.values())
     net_payout = gross_amount - tax_withheld
     tx_base_id = int(time.time())
-    
-    # Route 1: Net Pay to Worker
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
-    # Route 2: Tax Withholding to Corporate/Gov Treasury
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
     return net_payout, tax_withheld
+
+def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
+    workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
+    if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
+    start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
+    fac_lat, fac_lon = HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"]
+    distance_meters = haversine_distance(current_lat, current_lon, fac_lat, fac_lon)
+    
+    if distance_meters > GEOFENCE_RADIUS:
+        hours_worked = (time.time() - start_time) / 3600
+        shift_gross = hours_worked * USERS[pin]['rate']
+        final_gross = current_earnings + shift_gross
+        update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon)
+        log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Geofence exited ({distance_meters:.0f}m)")
+        hr_data = run_query("SELECT solana_pubkey FROM hr_onboarding WHERE pin=:p", {"p": pin})
+        user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
+        if not user_pubkey: return True, "Auto-Clocked out, but funds held. No Web3 wallet linked."
+        
+        if is_sos_bounty and shift_id:
+            release_escrow_bounty(shift_id, pin, user_pubkey)
+            status_msg = f"Escrow Smart Contract unlocked. ${final_gross:,.2f} released."
+        else:
+            net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey)
+            status_msg = f"Standard Shift Auto-Cashed Out. ${net:,.2f} routed to wallet."
+        if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {status_msg}")
+        return True, status_msg
+    return False, "User still within geofence."
+
+def process_ble_beacon_ping(pin, major_floor, minor_room, rssi_signal):
+    """
+    Called by the native mobile app when a BLE beacon is detected nearby.
+    """
+    if rssi_signal > -70: 
+        run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, last_seen) VALUES (:p, :f, :r, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room})
+        return True
+    return False
+
+def check_isolation_hazard_pay(pin, isolation_room):
+    """
+    Compliant BLE Use Case: Automatically logs Hazard/Isolation pay multipliers
+    based on verified physical time spent inside designated high-acuity/isolation rooms.
+    """
+    tracker = run_query("SELECT current_room FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
+    if tracker and tracker[0][0] == isolation_room:
+        # Worker was physically verified in the isolation room. Log the hazard premium.
+        log_action(pin, "HAZARD PAY LOGGED", 15.00, f"Verified Isolation Care in {isolation_room}")
+        return True
+    return False
 
 def phantom_wallet_connector():
     components.html("""
@@ -100,8 +198,7 @@ def phantom_wallet_connector():
                     if (provider.isPhantom) {
                         try {
                             const resp = await provider.connect();
-                            const pubKey = resp.publicKey.toString();
-                            statusText.innerHTML = "Wallet Linked! Copy your key below: <br><strong style='color:#10b981;'>" + pubKey + "</strong>";
+                            statusText.innerHTML = "Wallet Linked! Copy your key below: <br><strong style='color:#10b981;'>" + resp.publicKey.toString() + "</strong>";
                             connectBtn.style.backgroundColor = "#10b981"; connectBtn.innerText = "Wallet Connected";
                         } catch (err) { statusText.innerHTML = "Connection cancelled."; }
                     }
@@ -110,8 +207,7 @@ def phantom_wallet_connector():
         </script>
         """, height=140)
 
-# --- CONFIGURATION & CSS ---
-st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+# --- CSS & AUTHENTICATION ---
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
@@ -141,107 +237,27 @@ html_style = """
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
-# --- DATABASE ENGINE & DATA MIGRATION ---
-@st.cache_resource
-def get_db_engine():
-    url = os.environ.get("SUPABASE_URL")
-    if not url:
-        try: url = st.secrets["SUPABASE_URL"]
-        except: pass
-    if not url: return None
-    if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
-    try:
-        engine = create_engine(url)
-        with engine.connect() as conn:
-            conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
-            try: conn.execute(text("ALTER TABLE marketplace ADD COLUMN escrow_status text;"))
-            except: pass
-            
-            # Transactions Auto-Migration for Split Stream
-            conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text);"))
-            try: conn.execute(text("ALTER TABLE transactions ADD COLUMN destination_pubkey text;"))
-            except: pass
-            try: conn.execute(text("ALTER TABLE transactions ADD COLUMN tx_type text;"))
-            except: pass
-            
-            conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
-            try: conn.execute(text("ALTER TABLE hr_onboarding ADD COLUMN solana_pubkey text;"))
-            except: pass
-            conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS account_security (pin text PRIMARY KEY, password text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
-            conn.commit()
-        return engine
-    except Exception as e: return None
 
-def run_query(query, params=None):
-    engine = get_db_engine()
-    if not engine: return None
-    try:
-        with engine.connect() as conn: return conn.execute(text(query), params or {}).fetchall()
-    except Exception as e: return None
-
-def run_transaction(query, params=None):
-    engine = get_db_engine()
-    if not engine: return False
-    try:
-        with engine.connect() as conn: 
-            conn.execute(text(query), params or {})
-            conn.commit()
-            return True
-    except Exception as e: return False
-
-def force_cloud_sync(pin):
-    try:
-        rows = run_query("SELECT status, start_time, earnings FROM workers WHERE pin = :pin", {"pin": pin})
-        if rows and len(rows) > 0:
-            st.session_state.user_state['active'] = (rows[0][0].lower() == 'active')
-            st.session_state.user_state['start_time'] = float(rows[0][1]) if rows[0][1] else 0.0
-            st.session_state.user_state['earnings'] = float(rows[0][2]) if rows[0][2] else 0.0
-            return True
-        st.session_state.user_state['active'] = False; return False
-    except: return False
-
-def update_status(pin, status, start, earn, lat=0.0, lon=0.0):
-    q = "INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;"
-    return run_transaction(q, {"p": pin, "s": status, "t": start, "e": earn, "lat": lat, "lon": lon})
-
-def log_action(pin, action, amount, note): run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
-def link_web3_wallet(pin, solana_address): return run_transaction("INSERT INTO hr_onboarding (pin, solana_pubkey) VALUES (:p, :pubkey) ON CONFLICT (pin) DO UPDATE SET solana_pubkey = :pubkey;", {"p": pin, "pubkey": solana_address})
-def get_ytd_gross(pin): res = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND EXTRACT(YEAR FROM timestamp) = :y", {"p": pin, "y": datetime.now().year}); return sum([float(r[0]) for r in res if r[0]]) if res else 0.0
-def get_period_gross(pin, start_date, end_date): res = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= :s AND timestamp <= :e", {"p": pin, "s": start_date, "e": datetime.combine(end_date, datetime.max.time())}); return sum([float(r[0]) for r in res if r[0]]) if res else 0.0
-def haversine_distance(lat1, lon1, lat2, lon2): R = 6371000; phi1, phi2 = math.radians(lat1), math.radians(lat2); dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1); a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2; return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-# --- SECURE AUTH SCREEN (AUTO-MIGRATION) ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.3.8</p><br>", unsafe_allow_html=True)
     with st.container():
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
         login_email = st.text_input("ENTERPRISE EMAIL", placeholder="name@hospital.com")
         login_password = st.text_input("SECURE PASSWORD", type="password", placeholder="••••••••")
         st.markdown("<br>", unsafe_allow_html=True)
-        
         if st.button("AUTHENTICATE CONNECTION"):
             auth_pin = None
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
                     db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
                     if db_pw_res:
-                        active_password_hash = db_pw_res[0][0]
-                        if verify_password(login_password, active_password_hash): auth_pin = p; break
+                        if verify_password(login_password, db_pw_res[0][0]): auth_pin = p; break
                     else:
                         if login_password == d.get("password"):
-                            auth_pin = p
-                            secure_hash = hash_password(login_password)
-                            run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw)", {"p": p, "pw": secure_hash})
-                            break
+                            auth_pin = p; run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw)", {"p": p, "pw": hash_password(login_password)}); break
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]
                 st.session_state.pin = auth_pin
@@ -253,13 +269,12 @@ if 'logged_in_user' not in st.session_state:
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
-
 # --- TOP NAVIGATION ---
 c1, c2 = st.columns([8, 2])
 with c1:
     st.markdown(f"<div class='custom-header-pill'><div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'><span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> EC PROTOCOL</div><div style='text-align:right;'><div style='font-size:0.95rem; font-weight:800; color:#f8fafc;'>{user['name']}</div><div style='font-size:0.75rem; color:#38bdf8; text-transform:uppercase; letter-spacing:1px;'>{user['role']} | {user['dept']}</div></div></div>", unsafe_allow_html=True)
 with c2:
-    st.markdown("<br>", unsafe_allow_html=True); 
+    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
 if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
@@ -269,6 +284,7 @@ else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROF
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
+
 # --- MASTER ROUTING ---
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
@@ -299,11 +315,29 @@ if nav == "DASHBOARD":
             if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                 st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                 log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
-                
-                # ESCROW RELEASE TRIGGER
                 active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
                 if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
                 st.rerun()
+                
+     # BACKGROUND SIMULATION TOOLS
+        with st.expander("⚙️ App Simulation Engine (Test Background Pings)"):
+            st.caption("Simulate native mobile app triggers.")
+            if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
+                success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
+                if success:
+                    st.session_state.user_state['active'] = False
+                    st.success(msg); time.sleep(3); st.rerun()
+            
+            c_ble1, c_ble2 = st.columns(2)
+            if c_ble1.button("📡 Simulate BLE Ping (Enter Isolation Room 402)"):
+                process_ble_beacon_ping(pin, "Floor 4", "ISO-402", -50)
+                st.success("Indoor location physically verified in ISO-402")
+            if c_ble2.button("🛡️ Audit Isolation Care (Claim Hazard Pay)"):
+                if check_isolation_hazard_pay(pin, "ISO-402"):
+                    st.success("✅ BLE Verified! You were physically present in the isolation room. $15.00 Hazard Pay Logged.")
+                else: 
+                    st.error("❌ BLE Audit Failed. No tracking data found for ISO-402. You must enter the room first.")
+                
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
         if not user.get('vip', False):
@@ -316,7 +350,6 @@ if nav == "DASHBOARD":
                 if selected_facility != "Remote/Anywhere":
                     df_map = pd.DataFrame({'lat': [user_lat, fac_lat], 'lon': [user_lon, fac_lon], 'color': [[59, 130, 246, 200], [16, 185, 129, 200]], 'radius': [20, GEOFENCE_RADIUS]})
                     st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='color', get_radius='radius')], initial_view_state=pdk.ViewState(latitude=user_lat, longitude=user_lon, zoom=15, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
-                    
                     if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
                         st.success(f"✅ Geofence Confirmed.")
                         start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
@@ -329,16 +362,12 @@ if nav == "DASHBOARD":
                     st.success("✅ Remote Check-in Authorized.")
                     start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
                     if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
-                        start_t = time.time()
-                        if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
-                            st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
         else:
             st.caption("✨ VIP Security Override Active")
             start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
             if st.button("PUNCH IN") and start_pin == pin:
-                start_t = time.time()
-                if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0):
-                    st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
 
 elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     st.info("Executive Command Active.")
@@ -346,7 +375,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
-    
     c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM unit_census WHERE dept=:d", {"d": user['dept']})
     curr_pts, curr_high = (c_data[0][0], c_data[0][1]) if c_data else (0, 0)
     req_staff = math.ceil(curr_high / 3) + math.ceil(max(0, curr_pts - curr_high) / 6)
@@ -364,7 +392,7 @@ elif nav == "CENSUS & ACUITY":
             for i in range(abs(variance)):
                 new_shift_id = f"SOS-{int(time.time()*1000)}-{i}"
                 run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
-                lock_escrow_bounty(new_shift_id, rate) # TRIGGER SMART CONTRACT ESCROW
+                lock_escrow_bounty(new_shift_id, rate) 
             st.success("🚨 SOS Broadcasted! Smart Contract Escrow Locked!"); time.sleep(2.5); st.rerun()
     else: col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
 
@@ -375,7 +403,6 @@ elif nav == "CENSUS & ACUITY":
             if st.form_submit_button("Lock In Census"):
                 run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h})
                 st.success("Census Updated!"); time.sleep(1); st.rerun()
-
 elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Market"): st.rerun()
@@ -387,18 +414,7 @@ elif nav == "MARKETPLACE":
             s_id, s_role, s_date, s_time, s_rate, s_escrow = shift[0], shift[1], shift[2], shift[3], float(shift[4]), shift[5]
             est_payout = s_rate * 12
             escrow_badge = "<span style='background:#10b981; color:#0b1120; padding:3px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-left:10px;'>🔒 ESCROW SECURED</span>" if s_escrow == "LOCKED" else ""
-            
-            st.markdown(f"""
-            <div class='bounty-card'>
-                <div style='display:flex; justify-content:space-between; align-items:flex-start;'>
-                    <div>
-                        <div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div>
-                        <div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div>
-                        <div class='bounty-amount'>${est_payout:,.2f}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f}</div></div></div></div>", unsafe_allow_html=True)
             if st.button(f"⚡ CLAIM THIS SHIFT (${est_payout:,.0f})", key=f"claim_{s_id}"):
                 run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"p": pin, "id": s_id})
                 run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{s_id}", "p": pin, "d": s_date, "t": s_time, "dept": user['dept']})
@@ -412,18 +428,15 @@ elif nav == "SCHEDULE":
     with tab_mine:
         my_scheds = run_query("SELECT shift_id, shift_date, shift_time, COALESCE(status, 'SCHEDULED') FROM schedules WHERE pin=:p AND shift_date >= :today ORDER BY shift_date ASC", {"p": pin, "today": str(date.today())})
         if my_scheds:
-            for s in my_scheds:
-                st.markdown(f"<div class='glass-card'><strong>{s[1]}</strong> | {s[2]}</div>", unsafe_allow_html=True)
+            for s in my_scheds: st.markdown(f"<div class='glass-card'><strong>{s[1]}</strong> | {s[2]}</div>", unsafe_allow_html=True)
         else: st.info("No upcoming shifts.")
 
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     if st.button("🔄 Refresh Bank Ledger"): st.rerun()
-    
     st.markdown("### 🔗 Web3 Settlement Rail")
     st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Link your Solana wallet for T+0 USDC PayFi Settlement.</p>", unsafe_allow_html=True)
     phantom_wallet_connector()
-    
     with st.expander("Register Web3 Public Key"):
         with st.form("web3_register"):
             st.caption("Paste your Phantom Wallet key here to lock it to your HR profile.")
@@ -440,18 +453,9 @@ elif nav == "THE BANK":
     banked_gross = st.session_state.user_state.get('earnings', 0.0)
     banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
     
-    st.markdown(f"""
-    <div class='stripe-box'>
-        <div style='display:flex; justify-content:space-between; align-items:center;'>
-            <span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span>
-        </div>
-        <h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1>
-        <p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
-        # NEW ATOMIC PAYOUT LOGIC
         if st.button("⚡ EXECUTE ATOMIC PAYOUT", key="web3_btn", use_container_width=True):
             if solana_key:
                 net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
@@ -459,10 +463,8 @@ elif nav == "THE BANK":
                 st.session_state.user_state['earnings'] = 0.0
                 st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury.")
                 time.sleep(3); st.rerun()
-            else:
-                st.error("❌ No Web3 Wallet linked. Please connect your Phantom Wallet and register your key above.")
-    elif st.session_state.user_state.get('active', False): 
-        st.info("You must clock out of your active shift before executing a payout.")
+            else: st.error("❌ No Web3 Wallet linked. Please connect your Phantom Wallet and register your key above.")
+    elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
