@@ -43,11 +43,13 @@ def send_sms(to_phone, message_body):
 
 # --- BCRYPT SECURITY ENGINES ---
 def hash_password(plain_text_password):
+    """Generates a secure salt and hashes the password."""
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(plain_text_password.encode('utf-8'), salt)
     return hashed.decode('utf-8')
 
 def verify_password(plain_text_password, hashed_password):
+    """Checks if the plain text matches the database hash."""
     try:
         return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
     except ValueError:
@@ -75,29 +77,24 @@ def phantom_wallet_connector():
                         try {
                             const resp = await provider.connect();
                             const pubKey = resp.publicKey.toString();
-                            statusText.innerHTML = "Connected: " + pubKey.substring(0, 4) + "..." + pubKey.substring(pubKey.length - 4);
+                            statusText.innerHTML = "Wallet Linked! Copy your key below: <br><strong style='color:#10b981;'>" + pubKey + "</strong>";
                             connectBtn.style.backgroundColor = "#10b981";
-                            connectBtn.innerText = "Wallet Linked";
-                            
-                            window.parent.postMessage({
-                                type: 'streamlit:setComponentValue',
-                                value: pubKey
-                            }, '*');
+                            connectBtn.innerText = "Wallet Connected";
                         } catch (err) {
                             statusText.innerHTML = "Connection cancelled.";
                         }
                     }
                 } else {
                     window.open('https://phantom.app/', '_blank');
-                    statusText.innerHTML = "Please install Phantom Wallet.";
+                    statusText.innerHTML = "Please install Phantom Wallet extension.";
                 }
             });
         </script>
         """,
-        height=120,
+        height=140,
     )
 
-# --- 1. CONFIGURATION & STABLE CSS OVERHAUL ---
+# --- 1. CONFIGURATION & CSS OVERHAUL ---
 st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 html_style = """
@@ -184,7 +181,12 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS comms_log (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, signed_date timestamp DEFAULT NOW());"))
+            
+            # Create hr_onboarding and ensure it has solana_pubkey for existing DBs
+            conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
+            try: conn.execute(text("ALTER TABLE hr_onboarding ADD COLUMN solana_pubkey text;"))
+            except: pass # Will silently pass if column already exists
+            
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS account_security (pin text PRIMARY KEY, password text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
@@ -228,6 +230,14 @@ def update_status(pin, status, start, earn, lat=0.0, lon=0.0):
 def log_action(pin, action, amount, note):
     run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
 
+def link_web3_wallet(pin, solana_address):
+    query = """
+    INSERT INTO hr_onboarding (pin, solana_pubkey) 
+    VALUES (:p, :pubkey) 
+    ON CONFLICT (pin) DO UPDATE SET solana_pubkey = :pubkey;
+    """
+    return run_transaction(query, {"p": pin, "pubkey": solana_address})
+
 def get_ytd_gross(pin):
     res = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND EXTRACT(YEAR FROM timestamp) = :y", {"p": pin, "y": datetime.now().year})
     return sum([float(r[0]) for r in res if r[0]]) if res else 0.0
@@ -243,77 +253,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 4. PDF ENGINES ---
-if PDF_ACTIVE:
-    class PayStubPDF(FPDF):
-        def header(self):
-            self.set_font('Arial', 'B', 16); self.set_text_color(59, 130, 246); self.cell(0, 10, 'EC Protocol Enterprise Health', 0, 1, 'L')
-            self.set_font('Arial', '', 10); self.set_text_color(100, 116, 139); self.cell(0, 5, 'Secure Workforce Payroll', 0, 1, 'L'); self.ln(10)
-        def section_title(self, title):
-            self.set_font('Arial', 'B', 12); self.set_fill_color(241, 245, 249); self.set_text_color(15, 23, 42); self.cell(0, 8, f'  {title}', 0, 1, 'L', True); self.ln(2)
-        def table_row(self, c1, c2, c3, c4, c5, c6, bold=False):
-            self.set_font('Arial', 'B' if bold else '', 9)
-            self.cell(45, 7, str(c1), 0, 0, 'L'); self.cell(25, 7, str(c2), 0, 0, 'R'); self.cell(25, 7, str(c3), 0, 0, 'R')
-            self.cell(30, 7, str(c4), 0, 0, 'R'); self.cell(30, 7, str(c5), 0, 0, 'R'); self.cell(35, 7, str(c6), 0, 1, 'R')
-        def tax_row(self, c1, c2, c3, bold=False):
-            self.set_font('Arial', 'B' if bold else '', 9)
-            self.cell(60, 7, str(c1), 0, 0, 'L'); self.cell(40, 7, str(c2), 0, 0, 'R'); self.cell(40, 7, str(c3), 0, 1, 'R')
-
-    def generate_pay_stub(user_data, start_date, end_date, period_gross, ytd_gross):
-        pdf = PayStubPDF(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font('Arial', 'B', 12); pdf.cell(100, 10, f"EMPLOYEE: {user_data['name'].upper()}", 0, 0)
-        pdf.set_font('Arial', '', 10); pdf.cell(90, 10, f"Pay Period: {start_date.strftime('%m/%d/%Y')} - {end_date.strftime('%m/%d/%Y')}", 0, 1, 'R')
-        pdf.cell(100, 5, f"ID: {user_data['pin']} | Dept: {user_data['dept'].upper()}", 0, 0); pdf.cell(90, 5, f"Check Date: {date.today().strftime('%m/%d/%Y')}", 0, 1, 'R'); pdf.ln(10)
-        pdf.section_title("EARNINGS"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139)
-        pdf.table_row("Item", "Rate", "Hours", "This Period", "YTD Hours", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
-        rate = user_data['rate']; ph = period_gross/rate if rate>0 else 0; yh = ytd_gross/rate if rate>0 else 0
-        pdf.table_row("Regular Pay", f"${rate:,.2f}", f"{ph:,.2f}", f"${period_gross:,.2f}", f"{yh:,.2f}", f"${ytd_gross:,.2f}")
-        pdf.ln(2); pdf.set_fill_color(248, 250, 252); pdf.table_row("GROSS PAY", "", "", f"${period_gross:,.2f}", "", f"${ytd_gross:,.2f}", bold=True); pdf.ln(8)
-        pdf.section_title("TAXES"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139); pdf.tax_row("Tax", "This Period", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
-        pt = {k: period_gross * v for k, v in TAX_RATES.items()}; yt = {k: ytd_gross * v for k, v in TAX_RATES.items()}
-        pdf.tax_row("Federal Income", f"${pt['FED']:,.2f}", f"${yt['FED']:,.2f}"); pdf.tax_row("State (MA)", f"${pt['MA']:,.2f}", f"${yt['MA']:,.2f}")
-        pdf.tax_row("Social Security", f"${pt['SS']:,.2f}", f"${yt['SS']:,.2f}"); pdf.tax_row("Medicare", f"${pt['MED']:,.2f}", f"${yt['MED']:,.2f}"); pdf.ln(2)
-        pdf.set_fill_color(248, 250, 252); pdf.tax_row("TOTAL TAXES", f"${sum(pt.values()):,.2f}", f"${sum(yt.values()):,.2f}", bold=True); pdf.ln(10)
-        net_pay = period_gross - sum(pt.values())
-        pdf.set_fill_color(241, 245, 249); pdf.rect(10, pdf.get_y(), 190, 35, 'F'); pdf.set_y(pdf.get_y() + 5)
-        pdf.set_font('Arial', 'B', 10); pdf.cell(63, 5, "CURRENT GROSS", 0, 0, 'C'); pdf.cell(63, 5, "DEDUCTIONS", 0, 0, 'C'); pdf.cell(63, 5, "NET PAY", 0, 1, 'C')
-        pdf.set_font('Arial', 'B', 14); pdf.cell(63, 10, f"${period_gross:,.2f}", 0, 0, 'C'); pdf.set_text_color(239, 68, 68); pdf.cell(63, 10, f"${sum(pt.values()):,.2f}", 0, 0, 'C'); pdf.set_text_color(16, 185, 129); pdf.cell(63, 10, f"${net_pay:,.2f}", 0, 1, 'C')
-        return bytes(pdf.output(dest='S'))
-
-    class AuditPDF(FPDF):
-        def header(self):
-            self.set_font('Arial', 'B', 16); self.set_text_color(239, 68, 68); self.cell(0, 10, 'EC Protocol Enterprise Health - OFFICIAL COMPLIANCE RECORD', 0, 1, 'C')
-            self.set_font('Arial', 'B', 10); self.set_text_color(100, 116, 139); self.cell(0, 5, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} EST', 0, 1, 'C'); self.ln(5)
-
-    def generate_jcaho_audit(target_date, dept_name):
-        pdf = AuditPDF(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font('Arial', 'B', 12); pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, f"JCAHO AUDIT REPORT: {dept_name.upper()} | DATE: {target_date}", 0, 1, 'L')
-        pdf.set_fill_color(241, 245, 249); pdf.cell(0, 8, '  STAFF ROSTER & CREDENTIAL VERIFICATION', 0, 1, 'L', True); pdf.ln(2)
-        q = "SELECT pin, timestamp FROM history WHERE DATE(timestamp) = :d AND action IN ('CLOCK IN', 'CLOCK OUT') ORDER BY pin, timestamp"
-        res = run_query(q, {"d": str(target_date)})
-        if res:
-            worked_pins = list(set([str(r[0]) for r in res]))
-            for w_pin in worked_pins:
-                if USERS.get(w_pin, {}).get('dept') == dept_name:
-                    name = USERS.get(w_pin, {}).get('name', f"User {w_pin}")
-                    pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, f"Staff Member: {name} (ID: {w_pin})", 0, 1, 'L')
-                    creds = run_query("SELECT doc_type, exp_date FROM credentials WHERE pin=:p", {"p": w_pin})
-                    pdf.set_font('Arial', '', 9)
-                    if creds:
-                        for c in creds:
-                            exp_d = datetime.strptime(c[1], "%Y-%m-%d").date()
-                            status = "VALID" if exp_d >= target_date else "EXPIRED"
-                            pdf.cell(10, 5, "", 0, 0); pdf.cell(80, 5, f"- {c[0]}", 0, 0)
-                            pdf.cell(40, 5, f"Exp: {c[1]}", 0, 0); pdf.cell(0, 5, f"[{status}]", 0, 1)
-                    else:
-                        pdf.cell(10, 5, "", 0, 0); pdf.cell(0, 5, "- No credentials on file in Vault.", 0, 1)
-                    pdf.ln(3)
-        else:
-            pdf.set_font('Arial', '', 10); pdf.cell(0, 10, "No shift data recorded for this date.", 0, 1, 'L')
-        return bytes(pdf.output(dest='S'))
-
-# --- 5. SECURE AUTH SCREEN (NOW WITH BCRYPT) ---
+# --- 5. SECURE AUTH SCREEN (AUTO-MIGRATION & BCRYPT) ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 if 'logged_in_user' not in st.session_state:
@@ -329,31 +269,38 @@ if 'logged_in_user' not in st.session_state:
             auth_pin = None
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
+                    # Check database for secure hash
                     db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
+                    
                     if db_pw_res:
-                        # User has set a custom password, verify against the secure Bcrypt Hash
+                        # User has a secure hash in the DB
                         active_password_hash = db_pw_res[0][0]
                         if verify_password(login_password, active_password_hash):
                             auth_pin = p
                             break
-                    elif login_password == d.get("password"): 
-                        # Fallback ONLY for first-time login using the hardcoded dictionary
-                        auth_pin = p
-                        break
+                    else:
+                        # FALLBACK: First-time login using the hardcoded dictionary
+                        if login_password == d.get("password"):
+                            auth_pin = p
+                            # Auto-migrate them to a secure hash immediately
+                            secure_hash = hash_password(login_password)
+                            run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw)", {"p": p, "pw": secure_hash})
+                            break
             
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]
                 st.session_state.pin = auth_pin
                 force_cloud_sync(auth_pin)
                 st.rerun()
-            else: st.error("❌ INVALID CREDENTIALS OR NETWORK ERROR")
+            else: 
+                st.error("❌ INVALID CREDENTIALS OR NETWORK ERROR")
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 6. TOP NAVIGATION AND HEADER (NO SIDEBAR) ---
+# --- 6. TOP NAVIGATION AND HEADER ---
 c1, c2 = st.columns([8, 2])
 with c1:
     st.markdown(f"""
@@ -724,6 +671,15 @@ elif nav == "THE BANK":
     st.markdown("### 🔗 Web3 Settlement Rail")
     st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Link your Solana wallet for T+0 USDC PayFi Settlement.</p>", unsafe_allow_html=True)
     phantom_wallet_connector()
+    
+    with st.expander("Register Web3 Public Key"):
+        with st.form("web3_register"):
+            st.caption("Once your wallet provides the key above, paste it here to securely lock it to your HR profile.")
+            pub_key_input = st.text_input("Solana Public Key")
+            if st.form_submit_button("Lock Key to Vault"):
+                link_web3_wallet(pin, pub_key_input)
+                st.success("✅ Solana Key Registered Successfully!"); time.sleep(1.5); st.rerun()
+
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
     
     bank_info = run_query("SELECT dd_bank, dd_acct_last4 FROM hr_onboarding WHERE pin=:p", {"p": pin})
@@ -817,12 +773,10 @@ elif nav == "MY PROFILE":
             if st.form_submit_button("Update Password"):
                 db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": pin})
                 
-                # Verify the current password dynamically 
                 is_current_valid = False
                 if db_pw_res:
                     is_current_valid = verify_password(current_pw, db_pw_res[0][0])
                 else:
-                    # If they haven't set a custom password yet, check against the dictionary
                     is_current_valid = (current_pw == USERS[pin]["password"])
 
                 if not is_current_valid: 
@@ -832,7 +786,6 @@ elif nav == "MY PROFILE":
                 elif len(new_pw) < 8: 
                     st.error("❌ Password must be at least 8 characters long.")
                 else:
-                    # Hash the new password before sending to Supabase
                     secure_hash = hash_password(new_pw)
                     run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw) ON CONFLICT (pin) DO UPDATE SET password=:pw", {"p": pin, "pw": secure_hash})
                     st.success("✅ Password successfully encrypted and updated!"); time.sleep(2); st.rerun()
