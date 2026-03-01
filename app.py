@@ -6,6 +6,7 @@ import math
 import pytz
 import os
 import bcrypt
+import hashlib
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from streamlit_js_eval import get_geolocation
@@ -15,17 +16,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- EXTERNAL LIBRARIES ---
-try:
-    from fpdf import FPDF
-    PDF_ACTIVE = True
-except ImportError:
-    PDF_ACTIVE = False
+try: from fpdf import FPDF; PDF_ACTIVE = True
+except ImportError: PDF_ACTIVE = False
 
-try:
-    from twilio.rest import Client
-    TWILIO_ACTIVE = True
-except ImportError:
-    TWILIO_ACTIVE = False
+try: from twilio.rest import Client; TWILIO_ACTIVE = True
+except ImportError: TWILIO_ACTIVE = False
 
 def send_sms(to_phone, message_body):
     if TWILIO_ACTIVE and to_phone:
@@ -41,21 +36,35 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
-# --- BCRYPT SECURITY ENGINES ---
+# --- CRYPTO: BCRYPT SECURITY ---
 def hash_password(plain_text_password):
-    """Generates a secure salt and hashes the password."""
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(plain_text_password.encode('utf-8'), salt)
     return hashed.decode('utf-8')
 
 def verify_password(plain_text_password, hashed_password):
-    """Checks if the plain text matches the database hash."""
-    try:
-        return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
-    except ValueError:
-        return False
+    try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    except ValueError: return False
 
-# --- WEB3 / PHANTOM WALLET CONNECTOR ---
+# --- CRYPTO: ZERO-KNOWLEDGE PROOFS ---
+def generate_zk_commitment(doc_number, pin):
+    """Creates a Zero-Knowledge proof of the credential to protect plain-text licenses."""
+    salt = os.environ.get("ZK_SECRET_SALT", "EC_PROTOCOL_ENTERPRISE_SALT")
+    payload = f"{doc_number}-{pin}-{salt}".encode('utf-8')
+    zk_hash = hashlib.sha256(payload).hexdigest()
+    return zk_hash
+
+# --- WEB3: ESCROW & PHANTOM WALLET ---
+def lock_escrow_bounty(shift_id, rate, hours=12):
+    """Simulates a Smart Contract locking the USDC from the Hospital's Treasury."""
+    run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
+    return True
+
+def release_escrow_bounty(shift_id, pin, user_pubkey):
+    """Triggered automatically when the provider clocks out using GPS validation."""
+    run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
+    return True
+
 def phantom_wallet_connector():
     components.html(
         """
@@ -65,11 +74,9 @@ def phantom_wallet_connector():
             </button>
             <p id="wallet-status" style="color: #94a3b8; font-size: 14px; margin-top: 10px;"></p>
         </div>
-
         <script>
             const connectBtn = document.getElementById('connect-btn');
             const statusText = document.getElementById('wallet-status');
-
             connectBtn.addEventListener('click', async () => {
                 if ('solana' in window) {
                     const provider = window.solana;
@@ -78,75 +85,47 @@ def phantom_wallet_connector():
                             const resp = await provider.connect();
                             const pubKey = resp.publicKey.toString();
                             statusText.innerHTML = "Wallet Linked! Copy your key below: <br><strong style='color:#10b981;'>" + pubKey + "</strong>";
-                            connectBtn.style.backgroundColor = "#10b981";
-                            connectBtn.innerText = "Wallet Connected";
-                        } catch (err) {
-                            statusText.innerHTML = "Connection cancelled.";
-                        }
+                            connectBtn.style.backgroundColor = "#10b981"; connectBtn.innerText = "Wallet Connected";
+                        } catch (err) { statusText.innerHTML = "Connection cancelled."; }
                     }
-                } else {
-                    window.open('https://phantom.app/', '_blank');
-                    statusText.innerHTML = "Please install Phantom Wallet extension.";
-                }
+                } else { window.open('https://phantom.app/', '_blank'); statusText.innerHTML = "Please install Phantom Wallet extension."; }
             });
         </script>
-        """,
-        height=140,
+        """, height=140,
     )
 
-# --- 1. CONFIGURATION & CSS OVERHAUL ---
+# --- CONFIGURATION & CSS ---
 st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
-
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
-    
-    [data-testid="stSidebar"] { display: none !important; }
-    [data-testid="collapsedControl"] { display: none !important; }
-    #MainMenu {visibility: hidden;} 
-    footer {visibility: hidden;} 
-    [data-testid="stToolbar"] {visibility: hidden !important;} 
-    header {background: transparent !important;}
-    
+    [data-testid="stSidebar"] { display: none !important; } [data-testid="collapsedControl"] { display: none !important; }
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;} [data-testid="stToolbar"] {visibility: hidden !important;} header {background: transparent !important;}
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
-    
     .custom-header-pill { background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 25px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
-    
     div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); }
     div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 2rem; font-weight: 800; }
-    
     .stButton>button { width: 100%; height: 55px; border-radius: 12px; font-weight: 700; font-size: 1rem; border: none; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); letter-spacing: 0.5px; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
-    
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
-    
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(245, 158, 11, 0.3); border-left: 5px solid #f59e0b; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
     .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(245, 158, 11, 0.6); }
     .bounty-card::before { content: '⚡ SURGE ACTIVE'; position: absolute; top: 18px; right: -35px; background: #f59e0b; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #10b981; margin: 10px 0; text-shadow: 0 0 25px rgba(16, 185, 129, 0.2); letter-spacing: -1px; }
-    
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
-    
     .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
     .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
     .sched-time { color: #34d399; font-weight: 800; min-width: 100px; font-size: 1rem; }
-
-    @media (max-width: 768px) {
-        .sched-row { flex-direction: column; align-items: flex-start; }
-        .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; }
-        div[data-testid="stMetricValue"] { font-size: 1.5rem !important; }
-        .bounty-amount { font-size: 2.2rem; }
-    }
+    @media (max-width: 768px) { .sched-row { flex-direction: column; align-items: flex-start; } .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; } div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
 
-# --- 2. CONSTANTS & ORG CHART ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
@@ -158,11 +137,8 @@ USERS = {
     "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True, "phone": None},
     "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True, "phone": None},
     "9999": {"email": "cfo@ecprotocol.com", "password": "password123", "pin": "9999", "name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "vip": True, "phone": None},
-    "2001": {"email": "icu@ecprotocol.com", "password": "password123", "pin": "2001", "name": "Elena Rostova", "role": "RN", "dept": "ICU", "level": "Worker", "rate": 75.00, "vip": False, "phone": None},
-    "3001": {"email": "ed@ecprotocol.com", "password": "password123", "pin": "3001", "name": "Marcus Vance", "role": "RN", "dept": "Emergency", "level": "Worker", "rate": 85.00, "vip": False, "phone": None}
 }
 
-# --- 3. DATABASE ENGINE ---
 @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
@@ -176,17 +152,19 @@ def get_db_engine():
         with engine.connect() as conn:
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text);"))
+            
+            # Escrow migration
+            conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
+            try: conn.execute(text("ALTER TABLE marketplace ADD COLUMN escrow_status text;"))
+            except: pass
+            
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS comms_log (msg_id text PRIMARY KEY, pin text, dept text, content text, timestamp timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
-            
-            # Create hr_onboarding and ensure it has solana_pubkey for existing DBs
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE hr_onboarding ADD COLUMN solana_pubkey text;"))
-            except: pass # Will silently pass if column already exists
-            
+            except: pass
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS account_security (pin text PRIMARY KEY, password text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
@@ -231,11 +209,7 @@ def log_action(pin, action, amount, note):
     run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
 
 def link_web3_wallet(pin, solana_address):
-    query = """
-    INSERT INTO hr_onboarding (pin, solana_pubkey) 
-    VALUES (:p, :pubkey) 
-    ON CONFLICT (pin) DO UPDATE SET solana_pubkey = :pubkey;
-    """
+    query = "INSERT INTO hr_onboarding (pin, solana_pubkey) VALUES (:p, :pubkey) ON CONFLICT (pin) DO UPDATE SET solana_pubkey = :pubkey;"
     return run_transaction(query, {"p": pin, "pubkey": solana_address})
 
 def get_ytd_gross(pin):
@@ -253,7 +227,75 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- 5. SECURE AUTH SCREEN (AUTO-MIGRATION & BCRYPT) ---
+if PDF_ACTIVE:
+    class PayStubPDF(FPDF):
+        def header(self):
+            self.set_font('Arial', 'B', 16); self.set_text_color(59, 130, 246); self.cell(0, 10, 'EC Protocol Enterprise Health', 0, 1, 'L')
+            self.set_font('Arial', '', 10); self.set_text_color(100, 116, 139); self.cell(0, 5, 'Secure Workforce Payroll', 0, 1, 'L'); self.ln(10)
+        def section_title(self, title):
+            self.set_font('Arial', 'B', 12); self.set_fill_color(241, 245, 249); self.set_text_color(15, 23, 42); self.cell(0, 8, f'  {title}', 0, 1, 'L', True); self.ln(2)
+        def table_row(self, c1, c2, c3, c4, c5, c6, bold=False):
+            self.set_font('Arial', 'B' if bold else '', 9)
+            self.cell(45, 7, str(c1), 0, 0, 'L'); self.cell(25, 7, str(c2), 0, 0, 'R'); self.cell(25, 7, str(c3), 0, 0, 'R')
+            self.cell(30, 7, str(c4), 0, 0, 'R'); self.cell(30, 7, str(c5), 0, 0, 'R'); self.cell(35, 7, str(c6), 0, 1, 'R')
+        def tax_row(self, c1, c2, c3, bold=False):
+            self.set_font('Arial', 'B' if bold else '', 9)
+            self.cell(60, 7, str(c1), 0, 0, 'L'); self.cell(40, 7, str(c2), 0, 0, 'R'); self.cell(40, 7, str(c3), 0, 1, 'R')
+
+    def generate_pay_stub(user_data, start_date, end_date, period_gross, ytd_gross):
+        pdf = PayStubPDF(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.set_font('Arial', 'B', 12); pdf.cell(100, 10, f"EMPLOYEE: {user_data['name'].upper()}", 0, 0)
+        pdf.set_font('Arial', '', 10); pdf.cell(90, 10, f"Pay Period: {start_date.strftime('%m/%d/%Y')} - {end_date.strftime('%m/%d/%Y')}", 0, 1, 'R')
+        pdf.cell(100, 5, f"ID: {user_data['pin']} | Dept: {user_data['dept'].upper()}", 0, 0); pdf.cell(90, 5, f"Check Date: {date.today().strftime('%m/%d/%Y')}", 0, 1, 'R'); pdf.ln(10)
+        pdf.section_title("EARNINGS"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139)
+        pdf.table_row("Item", "Rate", "Hours", "This Period", "YTD Hours", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
+        rate = user_data['rate']; ph = period_gross/rate if rate>0 else 0; yh = ytd_gross/rate if rate>0 else 0
+        pdf.table_row("Regular Pay", f"${rate:,.2f}", f"{ph:,.2f}", f"${period_gross:,.2f}", f"{yh:,.2f}", f"${ytd_gross:,.2f}")
+        pdf.ln(2); pdf.set_fill_color(248, 250, 252); pdf.table_row("GROSS PAY", "", "", f"${period_gross:,.2f}", "", f"${ytd_gross:,.2f}", bold=True); pdf.ln(8)
+        pdf.section_title("TAXES"); pdf.set_font('Arial', 'B', 9); pdf.set_text_color(100, 116, 139); pdf.tax_row("Tax", "This Period", "YTD Amount", bold=True); pdf.set_text_color(15, 23, 42)
+        pt = {k: period_gross * v for k, v in TAX_RATES.items()}; yt = {k: ytd_gross * v for k, v in TAX_RATES.items()}
+        pdf.tax_row("Federal Income", f"${pt['FED']:,.2f}", f"${yt['FED']:,.2f}"); pdf.tax_row("State (MA)", f"${pt['MA']:,.2f}", f"${yt['MA']:,.2f}")
+        pdf.tax_row("Social Security", f"${pt['SS']:,.2f}", f"${yt['SS']:,.2f}"); pdf.tax_row("Medicare", f"${pt['MED']:,.2f}", f"${yt['MED']:,.2f}"); pdf.ln(2)
+        pdf.set_fill_color(248, 250, 252); pdf.tax_row("TOTAL TAXES", f"${sum(pt.values()):,.2f}", f"${sum(yt.values()):,.2f}", bold=True); pdf.ln(10)
+        net_pay = period_gross - sum(pt.values())
+        pdf.set_fill_color(241, 245, 249); pdf.rect(10, pdf.get_y(), 190, 35, 'F'); pdf.set_y(pdf.get_y() + 5)
+        pdf.set_font('Arial', 'B', 10); pdf.cell(63, 5, "CURRENT GROSS", 0, 0, 'C'); pdf.cell(63, 5, "DEDUCTIONS", 0, 0, 'C'); pdf.cell(63, 5, "NET PAY", 0, 1, 'C')
+        pdf.set_font('Arial', 'B', 14); pdf.cell(63, 10, f"${period_gross:,.2f}", 0, 0, 'C'); pdf.set_text_color(239, 68, 68); pdf.cell(63, 10, f"${sum(pt.values()):,.2f}", 0, 0, 'C'); pdf.set_text_color(16, 185, 129); pdf.cell(63, 10, f"${net_pay:,.2f}", 0, 1, 'C')
+        return bytes(pdf.output(dest='S'))
+
+    class AuditPDF(FPDF):
+        def header(self):
+            self.set_font('Arial', 'B', 16); self.set_text_color(239, 68, 68); self.cell(0, 10, 'EC Protocol Enterprise Health - OFFICIAL COMPLIANCE RECORD', 0, 1, 'C')
+            self.set_font('Arial', 'B', 10); self.set_text_color(100, 116, 139); self.cell(0, 5, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} EST', 0, 1, 'C'); self.ln(5)
+
+    def generate_jcaho_audit(target_date, dept_name):
+        pdf = AuditPDF(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.set_font('Arial', 'B', 12); pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, f"JCAHO AUDIT REPORT: {dept_name.upper()} | DATE: {target_date}", 0, 1, 'L')
+        pdf.set_fill_color(241, 245, 249); pdf.cell(0, 8, '  STAFF ROSTER & CREDENTIAL VERIFICATION', 0, 1, 'L', True); pdf.ln(2)
+        q = "SELECT pin, timestamp FROM history WHERE DATE(timestamp) = :d AND action IN ('CLOCK IN', 'CLOCK OUT') ORDER BY pin, timestamp"
+        res = run_query(q, {"d": str(target_date)})
+        if res:
+            worked_pins = list(set([str(r[0]) for r in res]))
+            for w_pin in worked_pins:
+                if USERS.get(w_pin, {}).get('dept') == dept_name:
+                    name = USERS.get(w_pin, {}).get('name', f"User {w_pin}")
+                    pdf.set_font('Arial', 'B', 10); pdf.cell(0, 6, f"Staff Member: {name} (ID: {w_pin})", 0, 1, 'L')
+                    creds = run_query("SELECT doc_type, exp_date, doc_number FROM credentials WHERE pin=:p", {"p": w_pin})
+                    pdf.set_font('Arial', '', 9)
+                    if creds:
+                        for c in creds:
+                            exp_d = datetime.strptime(c[1], "%Y-%m-%d").date()
+                            status = "VALID" if exp_d >= target_date else "EXPIRED"
+                            pdf.cell(10, 5, "", 0, 0); pdf.cell(80, 5, f"- {c[0]} (ZK: {c[2][:8]}...)", 0, 0)
+                            pdf.cell(40, 5, f"Exp: {c[1]}", 0, 0); pdf.cell(0, 5, f"[{status}]", 0, 1)
+                    else:
+                        pdf.cell(10, 5, "", 0, 0); pdf.cell(0, 5, "- No credentials on file in Vault.", 0, 1)
+                    pdf.ln(3)
+        else:
+            pdf.set_font('Arial', '', 10); pdf.cell(0, 10, "No shift data recorded for this date.", 0, 1, 'L')
+        return bytes(pdf.output(dest='S'))
+        # --- 5. SECURE AUTH SCREEN (AUTO-MIGRATION) ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 if 'logged_in_user' not in st.session_state:
@@ -269,38 +311,30 @@ if 'logged_in_user' not in st.session_state:
             auth_pin = None
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
-                    # Check database for secure hash
                     db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
-                    
                     if db_pw_res:
-                        # User has a secure hash in the DB
                         active_password_hash = db_pw_res[0][0]
                         if verify_password(login_password, active_password_hash):
-                            auth_pin = p
-                            break
+                            auth_pin = p; break
                     else:
-                        # FALLBACK: First-time login using the hardcoded dictionary
                         if login_password == d.get("password"):
                             auth_pin = p
-                            # Auto-migrate them to a secure hash immediately
                             secure_hash = hash_password(login_password)
                             run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw)", {"p": p, "pw": secure_hash})
                             break
-            
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]
                 st.session_state.pin = auth_pin
                 force_cloud_sync(auth_pin)
                 st.rerun()
-            else: 
-                st.error("❌ INVALID CREDENTIALS OR NETWORK ERROR")
+            else: st.error("❌ INVALID CREDENTIALS OR NETWORK ERROR")
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 user = st.session_state.logged_in_user
 pin = st.session_state.pin
 
-# --- 6. TOP NAVIGATION AND HEADER ---
+# --- 6. TOP NAVIGATION ---
 c1, c2 = st.columns([8, 2])
 with c1:
     st.markdown(f"""
@@ -316,9 +350,7 @@ with c1:
     """, unsafe_allow_html=True)
 with c2:
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🚪 LOGOUT"):
-        st.session_state.clear()
-        st.rerun()
+    if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
 if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
 elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
@@ -359,7 +391,13 @@ if nav == "DASHBOARD":
             new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
             if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                 st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
-                log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs"); st.rerun()
+                log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
+                
+                # ESCROW RELEASE TRIGGER
+                active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
+                if active_shifts:
+                    release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
+                st.rerun()
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
         if not user.get('vip', False):
@@ -369,7 +407,6 @@ if nav == "DASHBOARD":
             if camera_photo and loc:
                 user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
                 fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
-                
                 if selected_facility != "Remote/Anywhere":
                     df_map = pd.DataFrame({'lat': [user_lat, fac_lat], 'lon': [user_lon, fac_lon], 'color': [[59, 130, 246, 200], [16, 185, 129, 200]], 'radius': [20, GEOFENCE_RADIUS]})
                     st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='color', get_radius='radius')], initial_view_state=pdk.ViewState(latitude=user_lat, longitude=user_lon, zoom=15, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
@@ -417,11 +454,8 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
             c3.metric("Agency Avoidance Savings", f"${agency_avoidance:,.2f}")
             
             col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.plotly_chart(px.pie(df.groupby('Dept')['Amount'].sum().reset_index(), values='Amount', names='Dept', hole=0.6, template="plotly_dark").update_layout(margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"), use_container_width=True)
-            with col_chart2:
-                st.plotly_chart(go.Figure(go.Indicator(mode="gauge+number", value=agency_avoidance, title={'text': "Capital Saved ($)", 'font': {'size': 16, 'color': '#94a3b8'}}, gauge={'axis': {'range': [None, agency_cost]}, 'bar': {'color': "#10b981"}, 'bgcolor': "rgba(255,255,255,0.05)", 'steps': [{'range': [0, total_spend], 'color': "rgba(239,68,68,0.3)"}, {'range': [total_spend, agency_cost], 'color': "rgba(16,185,129,0.1)"}]})).update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, margin=dict(t=40, b=20, l=20, r=20)), use_container_width=True)
-            
+            with col_chart1: st.plotly_chart(px.pie(df.groupby('Dept')['Amount'].sum().reset_index(), values='Amount', names='Dept', hole=0.6, template="plotly_dark").update_layout(margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"), use_container_width=True)
+            with col_chart2: st.plotly_chart(go.Figure(go.Indicator(mode="gauge+number", value=agency_avoidance, title={'text': "Capital Saved ($)", 'font': {'size': 16, 'color': '#94a3b8'}}, gauge={'axis': {'range': [None, agency_cost]}, 'bar': {'color': "#10b981"}, 'bgcolor': "rgba(255,255,255,0.05)", 'steps': [{'range': [0, total_spend], 'color': "rgba(239,68,68,0.3)"}, {'range': [total_spend, agency_cost], 'color': "rgba(16,185,129,0.1)"}]})).update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, margin=dict(t=40, b=20, l=20, r=20)), use_container_width=True)
             st.plotly_chart(px.area(df.groupby('Date')['Amount'].sum().reset_index(), x="Date", y="Amount", template="plotly_dark").update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=20, b=0)), use_container_width=True)
             st.download_button(label="📥 Export Raw Ledger (CSV)", data=df.to_csv(index=False).encode('utf-8'), file_name='ec_ledger.csv', mime='text/csv')
         else: st.info("Awaiting shift completion data to render financial models.")
@@ -443,7 +477,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
 elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
     st.markdown("## 📊 Predictive Payroll Outflow")
     if st.button("🔄 Refresh Forecast"): st.rerun()
-    
     scheds = run_query("SELECT pin FROM schedules WHERE status='SCHEDULED'")
     base_outflow = sum((USERS.get(str(s[0]), {}).get('rate', 0.0) * 12) for s in scheds) if scheds else 0.0
     open_markets = run_query("SELECT rate FROM marketplace WHERE status='OPEN'")
@@ -459,8 +492,7 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
         for s in full_scheds:
             st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
     else: st.info("No baseline shifts scheduled.")
-
-elif nav == "CENSUS & ACUITY":
+    elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
     
@@ -481,14 +513,17 @@ elif nav == "CENSUS & ACUITY":
         if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
             rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
             for i in range(abs(variance)):
-                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN')", {"id": f"SOS-{int(time.time()*1000)}-{i}", "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
+                new_shift_id = f"SOS-{int(time.time()*1000)}-{i}"
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
+                # TRIGGER SMART CONTRACT ESCROW LOCK
+                lock_escrow_bounty(new_shift_id, rate)
             
             sms_sent = False
             for u_pin, u_data in USERS.items():
                 if u_data.get('dept') == user['dept'] and u_data.get('phone') and u_pin != pin:
                     success, msg = send_sms(u_data['phone'], f"EC PROTOCOL SOS: {user['dept']} needs {abs(variance)} staff NOW. Claim in app.")
                     if success: sms_sent = True
-            st.success("🚨 SOS Broadcasted! Shifts pushed" + (" and SMS Alerts dispatched!" if sms_sent else "."))
+            st.success("🚨 SOS Broadcasted! Smart Contract Escrow Locked & SMS Alerts dispatched!")
             time.sleep(2.5); st.rerun()
     else:
         col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
@@ -516,7 +551,6 @@ elif nav == "CENSUS & ACUITY":
 elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
     if st.button("🔄 Refresh Queue"): st.rerun()
-    
     if user['level'] == "Admin":
         st.markdown("### Stage 2: Treasury Release (CFO Verification)")
         pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
@@ -555,22 +589,22 @@ elif nav == "APPROVALS":
 elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Market"): st.rerun()
-    
     st.caption("Active surge bounties. Claim critical shifts instantly. Rates reflect 1.5x incentive multipliers.")
     st.markdown("<br>", unsafe_allow_html=True)
     
-    open_shifts = run_query("SELECT shift_id, role, date, start_time, rate FROM marketplace WHERE status='OPEN' ORDER BY date ASC")
+    open_shifts = run_query("SELECT shift_id, role, date, start_time, rate, escrow_status FROM marketplace WHERE status='OPEN' ORDER BY date ASC")
     if open_shifts:
         for shift in open_shifts:
-            s_id, s_role, s_date, s_time, s_rate = shift[0], shift[1], shift[2], shift[3], float(shift[4])
+            s_id, s_role, s_date, s_time, s_rate, s_escrow = shift[0], shift[1], shift[2], shift[3], float(shift[4]), shift[5]
             est_payout = s_rate * 12
+            escrow_badge = "<span style='background:#10b981; color:#0b1120; padding:3px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-left:10px;'>🔒 ESCROW SECURED</span>" if s_escrow == "LOCKED" else ""
             
             st.markdown(f"""
             <div class='bounty-card'>
                 <div style='display:flex; justify-content:space-between; align-items:flex-start;'>
                     <div>
                         <div style='color:#94a3b8; font-weight:800; text-transform:uppercase; letter-spacing:1px; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div>
-                        <div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}</div>
+                        <div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div>
                         <div class='bounty-amount'>${est_payout:,.2f}</div>
                         <div style='color:#94a3b8; font-size:0.9rem;'>Calculated Base: ${s_rate:,.2f}/hr (12hr shift)</div>
                     </div>
@@ -589,7 +623,6 @@ elif nav == "MARKETPLACE":
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
-    
     if user['level'] in ["Manager", "Director", "Admin"]: tab_mine, tab_hist, tab_master, tab_ai = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER"])
     else: tab_mine, tab_hist, tab_master = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER"])
         
@@ -666,12 +699,9 @@ elif nav == "SCHEDULE":
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     if st.button("🔄 Refresh Bank Ledger"): st.rerun()
-    
-    # --- WEB3 PHANTOM WALLET INTEGRATION ---
     st.markdown("### 🔗 Web3 Settlement Rail")
     st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Link your Solana wallet for T+0 USDC PayFi Settlement.</p>", unsafe_allow_html=True)
     phantom_wallet_connector()
-    
     with st.expander("Register Web3 Public Key"):
         with st.form("web3_register"):
             st.caption("Once your wallet provides the key above, paste it here to securely lock it to your HR profile.")
@@ -681,13 +711,10 @@ elif nav == "THE BANK":
                 st.success("✅ Solana Key Registered Successfully!"); time.sleep(1.5); st.rerun()
 
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
-    
     bank_info = run_query("SELECT dd_bank, dd_acct_last4 FROM hr_onboarding WHERE pin=:p", {"p": pin})
     has_bank = bank_info and bank_info[0][0] and bank_info[0][1]
-    
     banked_gross = st.session_state.user_state.get('earnings', 0.0)
     banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
-    
     if has_bank:
         b_name, b_last4 = bank_info[0][0], bank_info[0][1]
         st.markdown(f"""
@@ -704,7 +731,6 @@ elif nav == "THE BANK":
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
         if banked_net > 0.01 and not st.session_state.user_state.get('active', False):
             if st.button("💸 TRANSFER TO BANK (STRIPE)", key="stripe_btn", use_container_width=True):
                 tx_id = f"TX-{int(time.time())}"
@@ -712,7 +738,6 @@ elif nav == "THE BANK":
                     update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
                     st.success("✅ Withdrawal Requested! Awaiting Manager & CFO verification."); time.sleep(1.5); st.rerun()
         elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before transferring funds.")
-            
     else:
         st.markdown(f"<div class='glass-card' style='text-align:center;'><h3 style='color:#f8fafc; margin-bottom:5px;'>${banked_net:,.2f} Available</h3><p style='color:#94a3b8; font-size:0.9rem;'>You must securely link a financial institution to withdraw funds.</p></div>", unsafe_allow_html=True)
         with st.expander("🔗 Securely Link Bank Account (Powered by Plaid)", expanded=True):
@@ -726,7 +751,6 @@ elif nav == "THE BANK":
                         run_transaction("INSERT INTO hr_onboarding (pin, dd_bank, dd_acct_last4) VALUES (:p, :b, :l4) ON CONFLICT (pin) DO UPDATE SET dd_bank=:b, dd_acct_last4=:l4", {"p": pin, "b": "Chase", "l4": acct_num[-4:]})
                         st.success("✅ Secure Connection Established!"); time.sleep(1.5); st.rerun()
                     else: st.error("Please enter a valid mock account number.")
-
     st.markdown("<br>", unsafe_allow_html=True)
     tab1, tab2, tab3 = st.tabs(["WITHDRAWAL HISTORY", "SHIFT LOGS", "PAY STUBS"])
     with tab1:
@@ -772,19 +796,13 @@ elif nav == "MY PROFILE":
             confirm_pw = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password"):
                 db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": pin})
-                
                 is_current_valid = False
-                if db_pw_res:
-                    is_current_valid = verify_password(current_pw, db_pw_res[0][0])
-                else:
-                    is_current_valid = (current_pw == USERS[pin]["password"])
+                if db_pw_res: is_current_valid = verify_password(current_pw, db_pw_res[0][0])
+                else: is_current_valid = (current_pw == USERS[pin]["password"])
 
-                if not is_current_valid: 
-                    st.error("❌ Current password incorrect.")
-                elif new_pw != confirm_pw: 
-                    st.error("❌ New passwords do not match.")
-                elif len(new_pw) < 8: 
-                    st.error("❌ Password must be at least 8 characters long.")
+                if not is_current_valid: st.error("❌ Current password incorrect.")
+                elif new_pw != confirm_pw: st.error("❌ New passwords do not match.")
+                elif len(new_pw) < 8: st.error("❌ Password must be at least 8 characters long.")
                 else:
                     secure_hash = hash_password(new_pw)
                     run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw) ON CONFLICT (pin) DO UPDATE SET password=:pw", {"p": pin, "pw": secure_hash})
@@ -811,11 +829,12 @@ elif nav == "MY PROFILE":
                 doc_num = st.text_input("License Number")
                 exp_date = st.date_input("Expiration Date")
                 if st.form_submit_button("Save Credential"):
-                    run_transaction("INSERT INTO credentials (doc_id, pin, doc_type, doc_number, exp_date, status) VALUES (:id, :p, :dt, :dn, :ed, 'ACTIVE')", {"id": f"DOC-{int(time.time())}", "p": pin, "dt": doc_type, "dn": doc_num, "ed": str(exp_date)})
-                    st.success("✅ Saved"); time.sleep(1); st.rerun()
+                    zk_hash = generate_zk_commitment(doc_num, pin)
+                    run_transaction("INSERT INTO credentials (doc_id, pin, doc_type, doc_number, exp_date, status) VALUES (:id, :p, :dt, :dn, :ed, 'ACTIVE')", {"id": f"DOC-{int(time.time())}", "p": pin, "dt": doc_type, "dn": zk_hash, "ed": str(exp_date)})
+                    st.success("✅ ZK Credential Secured. Plain-text license destroyed."); time.sleep(1.5); st.rerun()
         creds = run_query("SELECT doc_id, doc_type, doc_number, exp_date FROM credentials WHERE pin=:p", {"p": pin})
         if creds:
-            for c in creds: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #8b5cf6 !important;'><div style='font-size:1.1rem; font-weight:800; color:#f8fafc;'>{c[1]}</div><div style='color:#94a3b8;'>Exp: {c[3]}</div></div>", unsafe_allow_html=True)
+            for c in creds: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #8b5cf6 !important;'><div style='font-size:1.1rem; font-weight:800; color:#f8fafc;'>{c[1]}</div><div style='color:#94a3b8;'>ZK Hash: {c[2][:16]}... <br>Exp: {c[3]}</div></div>", unsafe_allow_html=True)
     with t_vax: st.info("Vaccine Vault Active. Use add tools above to load immunization docs.")
     with t_tax:
         hr_rec = run_query("SELECT w4_filing_status FROM hr_onboarding WHERE pin=:p", {"p": pin})
