@@ -11,4 +11,4 @@ twilio
 fpdf2
 pydeck
 plotly
-pip install bcrypt
+bcrypt
