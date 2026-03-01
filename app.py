@@ -1,9 +1,11 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import time
 import math
 import pytz
 import os
+import bcrypt
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from streamlit_js_eval import get_geolocation
@@ -39,6 +41,62 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
+# --- BCRYPT SECURITY ENGINES ---
+def hash_password(plain_text_password):
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(plain_text_password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+def verify_password(plain_text_password, hashed_password):
+    try:
+        return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    except ValueError:
+        return False
+
+# --- WEB3 / PHANTOM WALLET CONNECTOR ---
+def phantom_wallet_connector():
+    components.html(
+        """
+        <div style="text-align: center; font-family: 'Inter', sans-serif;">
+            <button id="connect-btn" style="background-color: #AB9FF2; color: #000; padding: 12px 24px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 16px; width: 100%; box-shadow: 0 4px 15px rgba(0,0,0,0.2); transition: all 0.2s ease;">
+                Connect Phantom Wallet
+            </button>
+            <p id="wallet-status" style="color: #94a3b8; font-size: 14px; margin-top: 10px;"></p>
+        </div>
+
+        <script>
+            const connectBtn = document.getElementById('connect-btn');
+            const statusText = document.getElementById('wallet-status');
+
+            connectBtn.addEventListener('click', async () => {
+                if ('solana' in window) {
+                    const provider = window.solana;
+                    if (provider.isPhantom) {
+                        try {
+                            const resp = await provider.connect();
+                            const pubKey = resp.publicKey.toString();
+                            statusText.innerHTML = "Connected: " + pubKey.substring(0, 4) + "..." + pubKey.substring(pubKey.length - 4);
+                            connectBtn.style.backgroundColor = "#10b981";
+                            connectBtn.innerText = "Wallet Linked";
+                            
+                            window.parent.postMessage({
+                                type: 'streamlit:setComponentValue',
+                                value: pubKey
+                            }, '*');
+                        } catch (err) {
+                            statusText.innerHTML = "Connection cancelled.";
+                        }
+                    }
+                } else {
+                    window.open('https://phantom.app/', '_blank');
+                    statusText.innerHTML = "Please install Phantom Wallet.";
+                }
+            });
+        </script>
+        """,
+        height=120,
+    )
+
 # --- 1. CONFIGURATION & STABLE CSS OVERHAUL ---
 st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
@@ -47,7 +105,6 @@ html_style = """
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
     
-    /* COMPLETELY DISABLE AND HIDE THE SIDEBAR AND TOGGLE BUTTON */
     [data-testid="stSidebar"] { display: none !important; }
     [data-testid="collapsedControl"] { display: none !important; }
     #MainMenu {visibility: hidden;} 
@@ -58,33 +115,26 @@ html_style = """
     .stApp { background-color: #0b1120; background-image: radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%), radial-gradient(at 100% 0%, rgba(16, 185, 129, 0.05) 0px, transparent 50%); background-attachment: fixed; color: #f8fafc; }
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 96% !important; }
     
-    /* Floating Custom Header */
     .custom-header-pill { background: rgba(11, 17, 32, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); padding: 15px 25px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 30px rgba(0,0,0,0.3); }
     
-    /* Glass Cards & Metrics */
     div[data-testid="metric-container"], .glass-card { background: rgba(30, 41, 59, 0.6) !important; backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.05) !important; border-radius: 16px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.3); }
     div[data-testid="metric-container"] label { color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f8fafc; font-size: 2rem; font-weight: 800; }
     
-    /* Buttons */
     .stButton>button { width: 100%; height: 55px; border-radius: 12px; font-weight: 700; font-size: 1rem; border: none; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); letter-spacing: 0.5px; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
     
-    /* Horizontal Radio Tabs Styling to look like an app menu */
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
     
-    /* Bounty Cards */
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(245, 158, 11, 0.3); border-left: 5px solid #f59e0b; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
     .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(245, 158, 11, 0.6); }
     .bounty-card::before { content: '⚡ SURGE ACTIVE'; position: absolute; top: 18px; right: -35px; background: #f59e0b; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #10b981; margin: 10px 0; text-shadow: 0 0 25px rgba(16, 185, 129, 0.2); letter-spacing: -1px; }
     
-    /* Empty States & FinTech */
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
     
-    /* Schedule Rows */
     .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
     .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
     .sched-time { color: #34d399; font-weight: 800; min-width: 100px; font-size: 1rem; }
@@ -263,7 +313,7 @@ if PDF_ACTIVE:
             pdf.set_font('Arial', '', 10); pdf.cell(0, 10, "No shift data recorded for this date.", 0, 1, 'L')
         return bytes(pdf.output(dest='S'))
 
-# --- 5. SECURE AUTH SCREEN ---
+# --- 5. SECURE AUTH SCREEN (NOW WITH BCRYPT) ---
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
 if 'logged_in_user' not in st.session_state:
@@ -280,9 +330,16 @@ if 'logged_in_user' not in st.session_state:
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
                     db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": p})
-                    active_password = db_pw_res[0][0] if db_pw_res else d.get("password")
-                    if login_password == active_password:
-                        auth_pin = p; break
+                    if db_pw_res:
+                        # User has set a custom password, verify against the secure Bcrypt Hash
+                        active_password_hash = db_pw_res[0][0]
+                        if verify_password(login_password, active_password_hash):
+                            auth_pin = p
+                            break
+                    elif login_password == d.get("password"): 
+                        # Fallback ONLY for first-time login using the hardcoded dictionary
+                        auth_pin = p
+                        break
             
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]
@@ -311,12 +368,11 @@ with c1:
     </div>
     """, unsafe_allow_html=True)
 with c2:
-    st.markdown("<br>", unsafe_allow_html=True) # spacing alignment
+    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"):
         st.session_state.clear()
         st.rerun()
 
-# Define tabs based on user level
 if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
 elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
 else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
@@ -664,6 +720,12 @@ elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     if st.button("🔄 Refresh Bank Ledger"): st.rerun()
     
+    # --- WEB3 PHANTOM WALLET INTEGRATION ---
+    st.markdown("### 🔗 Web3 Settlement Rail")
+    st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Link your Solana wallet for T+0 USDC PayFi Settlement.</p>", unsafe_allow_html=True)
+    phantom_wallet_connector()
+    st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
+    
     bank_info = run_query("SELECT dd_bank, dd_acct_last4 FROM hr_onboarding WHERE pin=:p", {"p": pin})
     has_bank = bank_info and bank_info[0][0] and bank_info[0][1]
     
@@ -747,20 +809,33 @@ elif nav == "MY PROFILE":
     t_lic, t_vax, t_tax, t_pto, t_sec = st.tabs(["🪪 LICENSES", "💉 VACCINES", "📑 ONBOARDING", "🏝️ TIME OFF", "🔐 SECURITY"])
     
     with t_sec:
-        st.markdown("### Account Security")
+        st.markdown("### Account Security (Bcrypt Active)")
         with st.form("update_password_form"):
             current_pw = st.text_input("Current Password", type="password")
             new_pw = st.text_input("New Password", type="password")
             confirm_pw = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password"):
                 db_pw_res = run_query("SELECT password FROM account_security WHERE pin=:p", {"p": pin})
-                active_password = db_pw_res[0][0] if db_pw_res else USERS[pin]["password"]
-                if current_pw != active_password: st.error("❌ Current password incorrect.")
-                elif new_pw != confirm_pw: st.error("❌ New passwords do not match.")
-                elif len(new_pw) < 8: st.error("❌ Password must be at least 8 characters long.")
+                
+                # Verify the current password dynamically 
+                is_current_valid = False
+                if db_pw_res:
+                    is_current_valid = verify_password(current_pw, db_pw_res[0][0])
                 else:
-                    run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw) ON CONFLICT (pin) DO UPDATE SET password=:pw", {"p": pin, "pw": new_pw})
-                    st.success("✅ Password successfully updated!"); time.sleep(2); st.rerun()
+                    # If they haven't set a custom password yet, check against the dictionary
+                    is_current_valid = (current_pw == USERS[pin]["password"])
+
+                if not is_current_valid: 
+                    st.error("❌ Current password incorrect.")
+                elif new_pw != confirm_pw: 
+                    st.error("❌ New passwords do not match.")
+                elif len(new_pw) < 8: 
+                    st.error("❌ Password must be at least 8 characters long.")
+                else:
+                    # Hash the new password before sending to Supabase
+                    secure_hash = hash_password(new_pw)
+                    run_transaction("INSERT INTO account_security (pin, password) VALUES (:p, :pw) ON CONFLICT (pin) DO UPDATE SET password=:pw", {"p": pin, "pw": secure_hash})
+                    st.success("✅ Password successfully encrypted and updated!"); time.sleep(2); st.rerun()
     with t_pto:
         with st.form("pto_form"):
             c1, c2 = st.columns(2)
