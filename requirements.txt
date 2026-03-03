@@ -12,3 +12,6 @@ fpdf2
 pydeck
 plotly
 bcrypt
+pynacl
+solana
+solders
