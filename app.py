@@ -16,7 +16,6 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
-# --- EXTERNAL LIBRARIES ---
 try: from fpdf import FPDF; PDF_ACTIVE = True
 except ImportError: PDF_ACTIVE = False
 try: from twilio.rest import Client; TWILIO_ACTIVE = True
@@ -24,7 +23,6 @@ except ImportError: TWILIO_ACTIVE = False
 try: import nacl.signing; import nacl.encoding; NACL_ACTIVE = True
 except ImportError: NACL_ACTIVE = False
 
-# --- GLOBAL CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
@@ -38,7 +36,6 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
-# --- CRYPTO & ZK PROOFS ---
 def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
@@ -82,8 +79,7 @@ def phantom_wallet_connector():
             });
         </script>
         """, height=180)
-    # --- DATABASE ENGINE & ENTERPRISE MIGRATION ---
-@st.cache_resource
+    @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
     if not url:
@@ -116,7 +112,7 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, last_seen timestamp DEFAULT NOW(), scan_method text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
             conn.commit()
         return engine
@@ -145,7 +141,6 @@ def load_all_users():
     return users_dict
 
 USERS = load_all_users()
-
 def log_action(pin, action, amount, note): return run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
 def update_status(pin, status, start, earn, lat=0.0, lon=0.0): return run_transaction("INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;", {"p": pin, "s": status, "t": start, "e": earn, "lat": float(lat), "lon": float(lon)})
 def haversine_distance(lat1, lon1, lat2, lon2): R = 6371000; phi1, phi2 = math.radians(lat1), math.radians(lat2); dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1); a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2; return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
@@ -157,7 +152,6 @@ def force_cloud_sync(pin):
         return True
     st.session_state.user_state['active'] = False; return False
 
-# --- FINANCIAL & PAYROLL ENGINE (NOW WITH DIFFERENTIALS) ---
 def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
@@ -168,13 +162,8 @@ def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     return net_payout, tax_withheld
 
 def calculate_shift_differentials(base_rate):
-    """Calculates Automated Night and Weekend Differentials based on the current clock-out time."""
-    current_time = datetime.now(LOCAL_TZ)
-    diff_rate = 0.0
-    notes = []
-    # Weekend Diff (Saturday=5, Sunday=6)
+    current_time = datetime.now(LOCAL_TZ); diff_rate = 0.0; notes = []
     if current_time.weekday() >= 5: diff_rate += 3.00; notes.append("WKD(+$3)")
-    # Night Diff (19:00 to 07:00)
     if current_time.hour >= 19 or current_time.hour < 7: diff_rate += 5.00; notes.append("NOC(+$5)")
     return diff_rate, " | ".join(notes)
 
@@ -184,14 +173,10 @@ def process_background_location_ping(pin, current_lat, current_lon, shift_id=Non
     start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
     distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
     if distance_meters > GEOFENCE_RADIUS:
-        hours_worked = (time.time() - start_time) / 3600
-        diff_rate, diff_notes = calculate_shift_differentials(USERS[pin]['rate'])
-        effective_rate = USERS[pin]['rate'] + diff_rate
-        shift_gross = hours_worked * effective_rate; final_gross = current_earnings + shift_gross
-        
-        log_note = f"Auto-Exit ({distance_meters:.0f}m)" + (f" [{diff_notes}]" if diff_notes else "")
+        hours_worked = (time.time() - start_time) / 3600; diff_rate, diff_notes = calculate_shift_differentials(USERS[pin]['rate'])
+        shift_gross = hours_worked * (USERS[pin]['rate'] + diff_rate); final_gross = current_earnings + shift_gross
         if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
-            log_action(pin, "AUTO CLOCK OUT", shift_gross, log_note)
+            log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [{diff_notes}]")
             hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
             user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
             if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
@@ -201,12 +186,13 @@ def process_background_location_ping(pin, current_lat, current_lon, shift_id=Non
             return True, msg
     return False, "User still within geofence."
 
-# --- ZERO-INCENTIVE COMPLIANCE TRACKING ---
 def log_indoor_presence(pin, major_floor, minor_room, scan_method="BLE"):
-    """Records physical presence via BLE beacon or QR code. Used purely for compliance, not financial bonuses."""
-    try: run_transaction("ALTER TABLE indoor_tracking ADD COLUMN scan_method text;")
-    except: pass
     return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, scan_method, last_seen) VALUES (:p, :f, :r, :sm, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, scan_method=:sm, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room, "sm": scan_method})
+
+def check_isolation_hazard_pay(pin, isolation_room):
+    tracker = run_query("SELECT current_room, scan_method FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
+    if tracker and tracker[0][0] == isolation_room: log_action(pin, "HAZARD PAY LOGGED", 15.00, f"Verified Isolation Care in {isolation_room} via {tracker[0][1]}"); return True
+    return False
 
 def award_accolade(pin, title, badge_type, emr_verified=True):
     return run_transaction("INSERT INTO accolades (acc_id, pin, title, badge_type, emr_verified) VALUES (:id, :p, :t, :b, :emr)", {"id": f"ACC-{int(time.time()*1000)}", "p": pin, "t": title, "b": badge_type, "emr": emr_verified})
@@ -234,7 +220,10 @@ html_style = """
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
-    @media (max-width: 768px) { div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
+    .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
+    .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
+    .sched-time { color: #34d399; font-weight: 800; min-width: 100px; font-size: 1rem; }
+    @media (max-width: 768px) { .sched-row { flex-direction: column; align-items: flex-start; } .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; } div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
@@ -243,7 +232,7 @@ if 'user_state' not in st.session_state: st.session_state.user_state = {'active'
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.5</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.5.0</p><br>", unsafe_allow_html=True)
     with st.container():
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
         login_email = st.text_input("ENTERPRISE EMAIL", placeholder="name@hospital.com")
@@ -274,8 +263,9 @@ with c2:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
+# --- SUPERVISOR ACCESS GRANTED ---
 if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
-elif user['level'] in ["Manager", "Director"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
+elif user['level'] in ["Manager", "Director", "Supervisor"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
 else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
 
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
@@ -285,15 +275,13 @@ st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; m
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
-    if user['level'] in ["Manager", "Director"]:
+    if user['level'] in ["Manager", "Director", "Supervisor"]:
         active_count = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")[0][0] if run_query("SELECT COUNT(*) FROM workers WHERE status='Active'") else 0
         shifts_count = run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'")[0][0] if run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'") else 0
         c1, c2, c3 = st.columns(3); c1.metric("Live Staff", active_count); c2.metric("Market Bounties", shifts_count, f"{shifts_count} Critical" if shifts_count > 0 else "Fully Staffed", delta_color="inverse"); c3.metric("Approvals", "Active")
         st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
 
     active = st.session_state.user_state.get('active', False)
-    
-    # Calculate Live Display with Differentials
     running_earn = 0.0; display_gross = 0.0
     if active:
         hrs = (time.time() - st.session_state.user_state['start_time']) / 3600
@@ -301,7 +289,6 @@ if nav == "DASHBOARD":
         running_earn = hrs * (user['rate'] + diff_rate)
         if diff_rate > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
-    
     c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross * (1 - sum(TAX_RATES.values())):,.2f}")
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -312,33 +299,35 @@ if nav == "DASHBOARD":
             if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                 st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                 hrs_w = running_earn / (user['rate'] + diff_rate)
-                log_note = f"Logged {hrs_w:.2f} hrs" + (f" [{diff_str}]" if diff_rate > 0 else "")
-                log_action(pin, "CLOCK OUT", running_earn, log_note)
+                log_action(pin, "CLOCK OUT", running_earn, f"Logged {hrs_w:.2f} hrs" + (f" [{diff_str}]" if diff_rate > 0 else ""))
                 active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
                 if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
                 st.rerun()
             else: st.error("❌ CRITICAL: Database refused clock-out.")
         
-        with st.expander("⚙️ App Simulation Engine (Test Geofence & BLE)"):
+        with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)"):
             st.caption("Simulate native mobile app triggers.")
             if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
                 success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
                 if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
             
             c_ble1, c_ble2 = st.columns(2)
-            if c_ble1.button("📡 Simulate BLE Ping (Crash Cart Audit)"): 
-                log_indoor_presence(pin, "Floor 2", "Crash-Cart-Zone-A", "BLE"); st.success("Presence verified via BLE Beacon.")
-            if c_ble2.button("📷 Simulate QR Scan (Medication Room)"):
-                log_indoor_presence(pin, "Floor 3", "Secure-Med-Room", "QR_CODE"); st.success("Presence verified via QR Scan.")
-            
-            if st.button("🛡️ Submit Safety Compliance Audit"):
-                tracker = run_query("SELECT current_room, scan_method FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
-                if tracker:
-                    room, method = tracker[0][0], tracker[0][1]
-                    award_accolade(pin, f"Safety Audit: {room}", "Compliance Verification", True)
-                    log_action(pin, "AUDIT LOGGED", 0.00, f"Safety check completed in {room} via {method}")
-                    st.success(f"✅ Compliance Logged! Audit verified via {method}. $0.00 Financial Incentive applied (Ethical Compliance Maintained).")
-                else: st.error("❌ Audit Failed. You must physically verify presence in a zone first.")
+            if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
+                log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
+            if c_ble2.button("🛡️ Audit Isolation Care"):
+                if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ Audit Verified!")
+                else: st.error("❌ BLE Audit Failed.")
+
+            st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+            st.caption("🏥 Advanced Clinical Accolades (EMR Verified)")
+            c_acc1, c_acc2 = st.columns(2)
+            if c_acc1.button("🩸 Simulate ECMO Deployment"):
+                award_accolade(pin, "Advanced Perfusion (ECMO)", "Clinical Operator", True)
+                st.success("✅ ECMO Operator Accolade Awarded!")
+            if c_acc2.button("💉 Simulate Vasopressor Admin"):
+                award_accolade(pin, "Critical Pharmacotherapy (Pressors)", "Clinical Operator", True)
+                st.success("✅ Medication Administration Accolade Awarded!")
+
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
         if not user.get('vip', False):
@@ -356,16 +345,12 @@ if nav == "DASHBOARD":
                             start_t = time.time()
                             if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
                                 st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                            else: st.error("❌ CRITICAL: Database connection failed. Clock-in not registered.")
                     else: st.error("❌ Geofence Failed.")
                 else:
                     st.success("✅ Remote Check-in Authorized.")
                     start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
                     if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
-                        start_t = time.time()
-                        if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
-                            st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
-                        else: st.error("❌ CRITICAL: Database connection failed.")
+                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
         else:
             st.caption("✨ VIP Security Override Active")
             start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
@@ -373,25 +358,54 @@ if nav == "DASHBOARD":
                 start_t = time.time()
                 if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0):
                     st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                else: st.error("❌ CRITICAL: Database transaction refused. Check Supabase connection.")
 
 elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     st.markdown("## 🦅 Executive Command Center")
     if st.button("🔄 Refresh Data Link"): st.rerun()
     t_finance, t_fleet, t_audit = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING", "🛡️ PROOF OF CARE AUDIT"])
-    with t_finance: st.info("Financial modeling active.")
-    with t_fleet: st.info("Fleet tracking active.")
+    with t_finance:
+        raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
+        if raw_history:
+            df = pd.DataFrame(raw_history, columns=["PIN", "Amount", "Date"]); df['Amount'] = df['Amount'].astype(float); df['Dept'] = df['PIN'].apply(lambda x: USERS.get(str(x), {}).get('dept', 'Unknown'))
+            total_spend = df['Amount'].sum(); agency_cost = total_spend * 2.5; agency_avoidance = agency_cost - total_spend
+            c1, c2, c3 = st.columns(3); c1.metric("Internal Labor Spend", f"${total_spend:,.2f}"); c2.metric("Projected Agency Cost", f"${agency_cost:,.2f}"); c3.metric("Agency Avoidance Savings", f"${agency_avoidance:,.2f}")
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1: st.plotly_chart(px.pie(df.groupby('Dept')['Amount'].sum().reset_index(), values='Amount', names='Dept', hole=0.6, template="plotly_dark").update_layout(margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"), use_container_width=True)
+            with col_chart2: st.plotly_chart(go.Figure(go.Indicator(mode="gauge+number", value=agency_avoidance, title={'text': "Capital Saved ($)", 'font': {'size': 16, 'color': '#94a3b8'}}, gauge={'axis': {'range': [None, agency_cost]}, 'bar': {'color': "#10b981"}, 'bgcolor': "rgba(255,255,255,0.05)", 'steps': [{'range': [0, total_spend], 'color': "rgba(239,68,68,0.3)"}, {'range': [total_spend, agency_cost], 'color': "rgba(16,185,129,0.1)"}]})).update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, margin=dict(t=40, b=20, l=20, r=20)), use_container_width=True)
+            st.plotly_chart(px.area(df.groupby('Date')['Amount'].sum().reset_index(), x="Date", y="Amount", template="plotly_dark").update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=20, b=0)), use_container_width=True)
+        else: st.info("Awaiting shift completion data to render financial models.")
+    with t_fleet:
+        active_workers = run_query("SELECT pin, start_time, earnings, lat, lon FROM workers WHERE status='Active'")
+        if active_workers:
+            map_data = []
+            for w in active_workers:
+                w_pin, w_start, w_lat, w_lon = str(w[0]), float(w[1]), w[3], w[4]; w_name = USERS.get(w_pin, {}).get("name", "Unknown"); hrs = (time.time() - w_start) / 3600
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><h4 style='margin:0;'>{w_name}</h4><span style='color:#10b981; font-weight:bold;'>🟢 ON CLOCK ({hrs:.2f} hrs)</span></div>", unsafe_allow_html=True)
+                if w_lat and w_lon: map_data.append({"name": w_name, "lat": float(w_lat), "lon": float(w_lon)})
+            if map_data: st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame(map_data), get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100)], initial_view_state=pdk.ViewState(latitude=pd.DataFrame(map_data)['lat'].mean(), longitude=pd.DataFrame(map_data)['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
+        else: st.info("No active operators in the field.")
     with t_audit:
         st.markdown("### Verified Safety & Compliance Audits")
         st.caption("A cryptographic ledger of all physically-verified clinical safety checks.")
         audits = run_query("SELECT pin, action, note, timestamp FROM history WHERE action='AUDIT LOGGED' ORDER BY timestamp DESC LIMIT 20")
         if audits:
             for aud in audits:
-                worker_name = USERS.get(str(aud[0]), {}).get('name', 'Unknown')
-                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between;'><strong>{worker_name}</strong><span style='color:#10b981;'>VERIFIED</span></div><div style='color:#94a3b8; font-size:0.85rem;'>{aud[2]} <br> {aud[3]}</div></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between;'><strong>{USERS.get(str(aud[0]), {}).get('name', 'Unknown')}</strong><span style='color:#10b981;'>VERIFIED</span></div><div style='color:#94a3b8; font-size:0.85rem;'>{aud[2]} <br> {aud[3]}</div></div>", unsafe_allow_html=True)
         else: st.info("No compliance audits logged yet.")
 
-elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin": st.info("Forecast Active")
+elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
+    st.markdown("## 📊 Predictive Payroll Outflow")
+    if st.button("🔄 Refresh Forecast"): st.rerun()
+    scheds = run_query("SELECT pin FROM schedules WHERE status='SCHEDULED'")
+    base_outflow = sum((USERS.get(str(s[0]), {}).get('rate', 0.0) * 12) for s in scheds) if scheds else 0.0
+    open_markets = run_query("SELECT rate FROM marketplace WHERE status='OPEN'")
+    critical_outflow = sum((float(m[0]) * 12) for m in open_markets) if open_markets else 0.0
+    c1, c2, c3 = st.columns(3); c1.metric("Scheduled Baseline", f"${base_outflow:,.2f}"); c2.metric("Critical SOS Liability", f"${critical_outflow:,.2f}", delta_color="inverse"); c3.metric("Total Forecasted Outflow", f"${base_outflow + critical_outflow:,.2f}")
+    st.markdown("<br><hr style='border-color: rgba(255,255,255,0.1);'><br>", unsafe_allow_html=True)
+    full_scheds = run_query("SELECT shift_id, pin, shift_date, shift_time, department FROM schedules WHERE status='SCHEDULED' ORDER BY shift_date ASC")
+    if full_scheds:
+        for s in full_scheds: st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
+    else: st.info("No baseline shifts scheduled.")
 
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
@@ -412,6 +426,10 @@ elif nav == "CENSUS & ACUITY":
                 lock_escrow_bounty(new_shift_id, rate) 
             st.success("🚨 SOS Broadcasted! Smart Contract Escrow Locked!"); time.sleep(2.5); st.rerun()
     else: col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
+    with st.expander("📝 UPDATE CENSUS NUMBERS"):
+        with st.form("update_census"):
+            new_t = st.number_input("Total Unit", min_value=0, value=curr_pts); new_h = st.number_input("High Acuity", min_value=0, value=curr_high)
+            if st.form_submit_button("Lock In Census"): run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, :t, :h) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h}); st.rerun()
 
 elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
@@ -426,8 +444,96 @@ elif nav == "MARKETPLACE":
                 run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"p": pin, "id": s_id}); run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{s_id}", "p": pin, "d": s_date, "t": s_time, "dept": user['dept']}); st.success("✅ Shift Claimed!"); time.sleep(2); st.rerun()
     else: st.markdown("<div class='empty-state'><h3>No Surge Bounties Active</h3></div>", unsafe_allow_html=True)
 
-elif nav == "SCHEDULE": st.info("Intelligent Scheduling Engine Active.")
-elif nav == "APPROVALS": st.info("Approvals Engine Active.")
+elif nav == "SCHEDULE":
+    st.markdown("## 📅 Intelligent Scheduling")
+    if st.button("🔄 Refresh Schedule"): st.rerun()
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_mine, tab_hist, tab_master, tab_ai = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER"])
+    else: tab_mine, tab_hist, tab_master = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER"])
+        
+    with tab_mine:
+        my_scheds = run_query("SELECT shift_id, shift_date, shift_time, COALESCE(status, 'SCHEDULED') FROM schedules WHERE pin=:p AND shift_date >= :today ORDER BY shift_date ASC", {"p": pin, "today": str(date.today())})
+        if my_scheds:
+            for s in my_scheds:
+                if s[3] == 'SCHEDULED':
+                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='font-size:1.1rem; font-weight:700; color:#f8fafc;'>{s[1]} <span style='color:#34d399;'>| {s[2]}</span></div></div>", unsafe_allow_html=True)
+                    col1, col2 = st.columns(2)
+                    if col1.button("🚨 CALL OUT", key=f"co_{s[0]}"): run_transaction("UPDATE schedules SET status='CALL_OUT' WHERE shift_id=:id", {"id": s[0]}); st.rerun()
+                    if col2.button("🔄 TRADE", key=f"tr_{s[0]}"): run_transaction("UPDATE schedules SET status='MARKETPLACE' WHERE shift_id=:id", {"id": s[0]}); st.rerun()
+                elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE PENDING)")
+                elif s[3] == 'MARKETPLACE': st.warning(f"🔄 {s[1]} | {s[2]} (ON MARKETPLACE)")
+        else: st.info("Your schedule is clear.")
+
+    with tab_hist:
+        past_shifts = run_query("SELECT timestamp, amount, note FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 15", {"p": pin})
+        if past_shifts:
+            for r in past_shifts: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #64748b !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>{r[2]}</strong><strong style='color: #38bdf8;'>${float(r[1]):,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{r[0]}</div></div>", unsafe_allow_html=True)
+        else: st.info("No worked shift history found.")
+
+    with tab_master:
+        all_s = run_query("SELECT shift_id, pin, shift_date, shift_time, department, COALESCE(status, 'SCHEDULED') FROM schedules WHERE shift_date >= :today ORDER BY shift_date ASC, shift_time ASC", {"today": str(date.today())})
+        if all_s:
+            groups = defaultdict(list)
+            for s in all_s: groups[s[2]].append(s)
+            for date_key in sorted(groups.keys()):
+                st.markdown(f"<div class='sched-date-header'>🗓️ {date_key}</div>", unsafe_allow_html=True)
+                for s in groups[date_key]:
+                    owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
+                    st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
+        else: st.info("Master calendar is empty for upcoming dates.")
+
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
+        with tab_ai:
+            st.markdown("### 🤖 Algorithmic Shift Assignment")
+            st.caption("AI prioritizes Equitable Fatigue Scoring (trailing 14-day hours) and PTO over Seniority to prevent burnout.")
+            with st.form("ai_scheduler"):
+                c1, c2 = st.columns(2); s_date = c1.date_input("Target Shift Date"); s_time = c2.text_input("Shift Time", value="0700-1900"); req_dept = st.selectbox("Department", ["Respiratory", "ICU", "Emergency"])
+                if st.form_submit_button("Analyze Optimal Staffing"): st.session_state.ai_date = s_date; st.session_state.ai_time = s_time; st.session_state.ai_dept = req_dept; st.rerun()
+            
+            if 'ai_date' in st.session_state:
+                st.markdown(f"#### AI Recommendations for {st.session_state.ai_date}")
+                workers_in_dept = {p: d for p, d in USERS.items() if d['dept'] == st.session_state.ai_dept and d['level'] in ['Worker', 'Supervisor']}
+                worker_stats = []
+                for w_pin, w_data in workers_in_dept.items():
+                    res = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '14 days'", {"p": w_pin})
+                    hrs = (sum([float(r[0]) for r in res]) / w_data['rate']) if res and w_data['rate'] > 0 else 0
+                    worker_stats.append({"pin": w_pin, "name": w_data['name'], "hrs": hrs})
+                for idx, stat in enumerate(sorted(worker_stats, key=lambda x: x['hrs'])[:3]):
+                    color = "#10b981" if stat['hrs'] < 72 else "#f59e0b"
+                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div><strong style='font-size:1.1rem; color:#f8fafc;'>Match #{idx+1}: {stat['name']}</strong><br><span style='color:#94a3b8; font-size:0.9rem;'>14-Day Fatigue Score: {stat['hrs']:.1f} hrs worked</span></div></div></div>", unsafe_allow_html=True)
+                    if st.button(f"⚡ DISPATCH TO {stat['name'].upper()}", key=f"ai_dispatch_{stat['pin']}"):
+                        run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": stat['pin'], "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success(f"✅ Shift assigned!"); del st.session_state.ai_date; time.sleep(2); st.rerun()
+
+elif nav == "APPROVALS":
+    st.markdown("## 📥 Approval Gateway")
+    st.caption("Review Timesheet Exceptions and Time Off Requests.")
+    if st.button("🔄 Refresh Queue"): st.rerun()
+    if user['level'] == "Admin":
+        pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
+        if pending_cfo:
+            for tx in pending_cfo:
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4>{USERS.get(str(tx[1]), {}).get('name', 'Unknown')} | ${float(tx[2]):,.2f}</h4></div>", unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                if c1.button("💸 RELEASE FUNDS", key=f"cfo_{tx[0]}"): run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
+                if c2.button("❌ DENY", key=f"den_{tx[0]}"): run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
+        else: st.info("No funds pending authorization.")
+    else:
+        tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
+        with tab_fin:
+            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
+            if pending_mgr:
+                with st.form("batch_verify_form"):
+                    selections = {tx[0]: st.checkbox(f"**{USERS.get(str(tx[1]), {}).get('name')}** — ${float(tx[2]):,.2f}") for tx in pending_mgr}
+                    if st.form_submit_button("☑️ BATCH VERIFY SELECTED"):
+                        for t_id, is_sel in selections.items():
+                            if is_sel: run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id", {"id": t_id})
+                        st.success("✅ Pushed to Treasury."); time.sleep(1.5); st.rerun()
+            else: st.info("No shift exceptions pending.")
+        with tab_pto:
+            pending_pto = run_query("SELECT req_id, pin, start_date, end_date FROM pto_requests WHERE status='PENDING'")
+            if pending_pto:
+                for p in pending_pto:
+                    if st.button(f"APPROVE PTO: {USERS.get(str(p[1]), {}).get('name')} ({p[2]} to {p[3]})", key=p[0]): run_transaction("UPDATE pto_requests SET status='APPROVED' WHERE req_id=:id", {"id": p[0]}); st.rerun()
+            else: st.info("No pending PTO requests.")
 
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
@@ -435,7 +541,6 @@ elif nav == "THE BANK":
     st.markdown("### 🔗 Web3 Settlement Rail")
     st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Authenticate with Phantom to generate your cryptographic signature.</p>", unsafe_allow_html=True)
     phantom_wallet_connector()
-    
     with st.expander("🔐 Verify & Lock Wallet Signature", expanded=True):
         with st.form("verify_signature_form"):
             st.info("Paste the generated JSON payload from the Phantom module above.")
@@ -444,38 +549,32 @@ elif nav == "THE BANK":
                 try:
                     auth_payload = json.loads(manual_payload_input)
                     if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], auth_payload['message']):
-                        run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
-                        st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
-                    else: st.error("❌ Cryptographic signature failed verification.")
-                except Exception as e: st.error("Invalid Payload Format. Please ensure you copied the entire JSON string.")
+                        run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin}); st.success("✅ Wallet locked."); time.sleep(1.5); st.rerun()
+                    else: st.error("❌ Signature failed verification.")
+                except Exception as e: st.error("Invalid Payload Format.")
 
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
     db_user_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
     solana_key = db_user_data[0][0] if db_user_data and db_user_data[0][0] else None
-    banked_gross = st.session_state.user_state.get('earnings', 0.0)
-    banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
-    
+    banked_gross = st.session_state.user_state.get('earnings', 0.0); banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
         if st.button("⚡ EXECUTE ATOMIC PAYOUT", key="web3_btn", use_container_width=True):
             if solana_key:
-                net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
-                update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
-                st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury."); time.sleep(3); st.rerun()
-            else: st.error("❌ No verified Web3 Wallet found. Please authenticate above.")
+                net, tax = execute_split_stream_payout(pin, banked_gross, solana_key); update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
+                st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}..."); time.sleep(3); st.rerun()
+            else: st.error("❌ No Web3 Wallet found. Please authenticate above.")
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
-    t_lic, t_sec, t_acc = st.tabs(["🪪 LICENSES (ZK PROOFS)", "🔐 SECURITY", "🏅 CLINICAL COMPLIANCE"])
-    
+    t_lic, t_sec, t_acc = st.tabs(["🪪 LICENSES (ZK PROOFS)", "🔐 SECURITY", "🏅 CLINICAL ACCOLADES"])
     with t_sec:
         st.markdown("### Account Security (Bcrypt)")
         with st.form("update_password_form"):
             current_pw = st.text_input("Current Password", type="password"); new_pw = st.text_input("New Password", type="password"); confirm_pw = st.text_input("Confirm New Password", type="password")
             if st.form_submit_button("Update Password"):
-                run_transaction("UPDATE enterprise_users SET password_hash=:pw WHERE pin=:p", {"p": pin, "pw": hash_password(new_pw)})
-                st.success("✅ Password encrypted and updated!"); time.sleep(2); st.rerun()
+                run_transaction("UPDATE enterprise_users SET password_hash=:pw WHERE pin=:p", {"p": pin, "pw": hash_password(new_pw)}); st.success("✅ Password updated!"); time.sleep(2); st.rerun()
     with t_lic:
         with st.expander("➕ ADD NEW CREDENTIAL"):
             with st.form("cred_form"):
@@ -489,17 +588,16 @@ elif nav == "MY PROFILE":
             for c in creds: st.markdown(f"<div class='glass-card'><h4>{c[0]}</h4><p style='color:#94a3b8;'>ZK Hash: {c[1][:16]}...<br>Exp: {c[2]}</p></div>", unsafe_allow_html=True)
             
     with t_acc:
-        st.markdown("### Verified Compliance History")
-        st.caption("Proof of Care (PoC) safety checks linked to your identity via EMR & BLE verification.")
+        st.markdown("### Verified Clinical History")
+        st.caption("Proof of Care (PoC) badges linked to your identity via EMR & BLE verification.")
         my_accolades = run_query("SELECT title, badge_type, timestamp, emr_verified FROM accolades WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
         if my_accolades:
             for acc in my_accolades:
                 title, b_type, ts, is_emr = acc[0], acc[1], acc[2], acc[3]
-                border_color = "#38bdf8" 
-                icon = "🛡️" 
-                emr_badge = "<span style='background:#10b981; color:#0b1120; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>✓ COMPLIANCE VERIFIED</span>"
+                border_color = "#f59e0b" if b_type == "Clinical Operator" else "#38bdf8"
+                icon = "👑" if b_type == "Clinical Operator" else "🛡️"
+                emr_badge = "<span style='background:#10b981; color:#0b1120; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>✓ EMR VERIFIED</span>" if is_emr else "<span style='background:#ef4444; color:#fff; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>PENDING</span>"
                 try: ts_str = ts.strftime('%b %d, %Y - %H:%M')
                 except: ts_str = str(ts)
                 st.markdown(f"<div style='background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(10px); border-left: 5px solid {border_color}; border-radius: 12px; padding: 18px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2);'><div><div style='font-size:1.2rem; font-weight:900; color:#f8fafc; margin-bottom: 4px;'>{icon} {title}</div><div style='color:#94a3b8; font-size:0.85rem; font-weight: 600; text-transform: uppercase;'>{b_type} <span style='color:#475569;'>•</span> {ts_str}</div></div><div style='text-align: right;'>{emr_badge}</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No Safety Audits</h3><p style='color:#64748b; font-size: 0.9rem;'>Complete physical safety checks (Crash Carts, Room Audits) to earn compliance badges.</p></div>", unsafe_allow_html=True)
+        else: st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No Accolades Yet</h3><p style='color:#64748b; font-size: 0.9rem;'>Respond to high-acuity events to earn on-chain clinical badges.</p></div>", unsafe_allow_html=True)
