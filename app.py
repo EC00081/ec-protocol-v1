@@ -16,6 +16,7 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- EXTERNAL LIBRARIES ---
 try: from fpdf import FPDF; PDF_ACTIVE = True
 except ImportError: PDF_ACTIVE = False
 try: from twilio.rest import Client; TWILIO_ACTIVE = True
@@ -23,6 +24,7 @@ except ImportError: TWILIO_ACTIVE = False
 try: import nacl.signing; import nacl.encoding; NACL_ACTIVE = True
 except ImportError: NACL_ACTIVE = False
 
+# --- GLOBAL CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
@@ -36,6 +38,7 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
+# --- CRYPTO & ZK PROOFS ---
 def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
@@ -79,7 +82,9 @@ def phantom_wallet_connector():
             });
         </script>
         """, height=140, key="phantom_auth")
-    @st.cache_resource
+
+# --- DATABASE ENGINE & ENTERPRISE MIGRATION ---
+@st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
     if not url:
@@ -101,7 +106,7 @@ def get_db_engine():
                     ("1004", "manager@ecprotocol.com", hash_password("password123"), "David Clark", "Manager", "Respiratory", "Manager", 0.00, None),
                     ("9999", "cfo@ecprotocol.com", hash_password("password123"), "CFO VIEW", "Admin", "All", "Admin", 0.00, None)
                 ]
-                for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph)"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
+                for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph) ON CONFLICT DO NOTHING"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
             
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
@@ -129,7 +134,7 @@ def run_transaction(query, params=None):
     if not engine: return False
     try:
         with engine.connect() as conn: conn.execute(text(query), params or {}); conn.commit(); return True
-    except Exception as e: st.error(f"DB Write Error (Transaction Refused): {e}"); return False
+    except Exception as e: st.error(f"DB Write Error: {e}"); return False
 
 def load_all_users():
     default_users = {"1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 120.00, "vip": False, "phone": "+15551234567"}}
@@ -141,10 +146,7 @@ def load_all_users():
 
 USERS = load_all_users()
 def log_action(pin, action, amount, note): return run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
-def update_status(pin, status, start, earn, lat=0.0, lon=0.0): 
-    # Forced float casting to prevent PostgreSQL type crashes
-    return run_transaction("INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;", {"p": pin, "s": status, "t": start, "e": earn, "lat": float(lat), "lon": float(lon)})
-
+def update_status(pin, status, start, earn, lat=0.0, lon=0.0): return run_transaction("INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;", {"p": pin, "s": status, "t": start, "e": earn, "lat": float(lat), "lon": float(lon)})
 def haversine_distance(lat1, lon1, lat2, lon2): R = 6371000; phi1, phi2 = math.radians(lat1), math.radians(lat2); dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1); a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2; return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def force_cloud_sync(pin):
@@ -191,7 +193,9 @@ def check_isolation_hazard_pay(pin, isolation_room):
     tracker = run_query("SELECT current_room FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
     if tracker and tracker[0][0] == isolation_room: log_action(pin, "HAZARD PAY LOGGED", 15.00, f"Verified Isolation Care in {isolation_room}"); return True
     return False
-    st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+
+# --- UI STYLING & APP STATE ---
+st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
@@ -223,7 +227,7 @@ if 'user_state' not in st.session_state: st.session_state.user_state = {'active'
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.1</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.2</p><br>", unsafe_allow_html=True)
     with st.container():
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
         login_email = st.text_input("ENTERPRISE EMAIL", placeholder="name@hospital.com")
@@ -261,6 +265,8 @@ else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROF
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
+
+# --- MASTER ROUTING ---
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
@@ -280,7 +286,6 @@ if nav == "DASHBOARD":
         end_pin = st.text_input("Enter 4-Digit PIN to Clock Out", type="password", key="end_pin")
         if st.button("PUNCH OUT") and end_pin == pin:
             new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
-            # STRICT DB VALIDATION
             if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                 st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                 log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
@@ -314,7 +319,6 @@ if nav == "DASHBOARD":
                         start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
                         if st.button("PUNCH IN") and start_pin == pin:
                             start_t = time.time()
-                            # STRICT DB VALIDATION
                             if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
                                 st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
                             else: st.error("❌ CRITICAL: Database connection failed. Clock-in not registered.")
@@ -332,7 +336,6 @@ if nav == "DASHBOARD":
             start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
             if st.button("PUNCH IN") and start_pin == pin:
                 start_t = time.time()
-                # STRICT DB VALIDATION
                 if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0):
                     st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
                 else: st.error("❌ CRITICAL: Database transaction refused. Check Supabase connection.")
