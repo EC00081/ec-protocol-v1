@@ -16,6 +16,7 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- EXTERNAL LIBRARIES ---
 try: from fpdf import FPDF; PDF_ACTIVE = True
 except ImportError: PDF_ACTIVE = False
 try: from twilio.rest import Client; TWILIO_ACTIVE = True
@@ -23,6 +24,7 @@ except ImportError: TWILIO_ACTIVE = False
 try: import nacl.signing; import nacl.encoding; NACL_ACTIVE = True
 except ImportError: NACL_ACTIVE = False
 
+# --- GLOBAL CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
@@ -36,6 +38,7 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
+# --- CRYPTO & ZK PROOFS ---
 def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
@@ -79,7 +82,9 @@ def phantom_wallet_connector():
             });
         </script>
         """, height=180)
-    @st.cache_resource
+
+# --- DATABASE ENGINE & ENTERPRISE MIGRATION ---
+@st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
     if not url:
@@ -145,7 +150,8 @@ def force_cloud_sync(pin):
         st.session_state.user_state['active'] = (rows[0][0].lower() == 'active'); st.session_state.user_state['start_time'] = float(rows[0][1]) if rows[0][1] else 0.0; st.session_state.user_state['earnings'] = float(rows[0][2]) if rows[0][2] else 0.0
         return True
     st.session_state.user_state['active'] = False; return False
-    def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
+
+def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
@@ -161,20 +167,35 @@ def calculate_shift_differentials(base_rate):
     return diff_rate, " | ".join(notes)
 
 def calculate_fatigue_score(p_pin, target_dept):
-    """The Equitable Fatigue Engine Math Model."""
     res_hrs = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '14 days'", {"p": p_pin})
     base_rate = float(USERS.get(p_pin, {}).get('rate', 0.1))
     hrs_worked = (sum([float(r[0]) for r in res_hrs]) / base_rate) if res_hrs else 0.0
-    score = hrs_worked
-    notes = []
-    # Penalty: High-Acuity Burnout Risk
+    score = hrs_worked; notes = []
     res_acc = run_query("SELECT count(*) FROM accolades WHERE pin=:p AND timestamp >= NOW() - INTERVAL '7 days'", {"p": p_pin})
     if res_acc and res_acc[0][0] > 0: score += 20.0; notes.append("Acuity Burnout Risk (+20)")
-    # Bonus: Continuity of Care Match
     res_rec = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '48 hours'", {"p": p_pin})
     if res_rec and res_rec[0][0] > 0 and USERS.get(p_pin, {}).get('dept') == target_dept: score -= 15.0; notes.append("Continuity Match (-15)")
     if hrs_worked > 72: notes.append("⚠️ Approaching Overtime")
     return score, hrs_worked, " | ".join(notes)
+
+def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
+    workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
+    if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
+    start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
+    distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
+    if distance_meters > GEOFENCE_RADIUS:
+        hours_worked = (time.time() - start_time) / 3600; diff_rate, diff_notes = calculate_shift_differentials(USERS[pin]['rate'])
+        shift_gross = hours_worked * (USERS[pin]['rate'] + diff_rate); final_gross = current_earnings + shift_gross
+        if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
+            log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [{diff_notes}]")
+            hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
+            user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
+            if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
+            if is_sos_bounty and shift_id: release_escrow_bounty(shift_id, pin, user_pubkey); msg = f"Escrow unlocked. ${final_gross:,.2f} released."
+            else: net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey); msg = f"Auto-Cashed Out. ${net:,.2f} routed."
+            if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {msg}")
+            return True, msg
+    return False, "User still within geofence."
 
 def log_indoor_presence(pin, major_floor, minor_room, scan_method="BLE"): return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, scan_method, last_seen) VALUES (:p, :f, :r, :sm, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, scan_method=:sm, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room, "sm": scan_method})
 def check_isolation_hazard_pay(pin, isolation_room):
@@ -254,7 +275,7 @@ else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROF
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
-# --- MASTER ROUTING ---
+
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
@@ -290,9 +311,16 @@ if nav == "DASHBOARD":
         
         with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)"):
             st.caption("Simulate native mobile app triggers.")
+            if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
+                success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
+                if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
+            
             c_ble1, c_ble2 = st.columns(2)
-            if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
-            if c_ble2.button("📷 Simulate QR Scan (Crash Cart)"): log_indoor_presence(pin, "Floor 2", "Crash-Cart-Zone", "QR_CODE"); st.success("Presence verified via QR Scan.")
+            if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
+                log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
+            if c_ble2.button("🛡️ Audit Isolation Care"):
+                if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ Audit Verified!")
+                else: st.error("❌ BLE Audit Failed.")
 
             st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
             st.caption("🏥 Advanced Clinical Accolades (EMR Verified)")
@@ -558,7 +586,7 @@ elif nav == "THE BANK":
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
-    t_lic, t_sec, t_acc = st.tabs(["🪪 LICENSES (ZK PROOFS)", "🔐 SECURITY", "🏅 CLINICAL COMPLIANCE"])
+    t_lic, t_sec, t_acc = st.tabs(["🪪 LICENSES (ZK PROOFS)", "🔐 SECURITY", "🏅 CLINICAL ACCOLADES"])
     
     with t_sec:
         st.markdown("### Account Security (Bcrypt)")
@@ -581,16 +609,16 @@ elif nav == "MY PROFILE":
             
     with t_acc:
         st.markdown("### Verified Clinical History")
-        st.caption("Proof of Care (PoC) safety checks linked to your identity via EMR & BLE verification.")
+        st.caption("Proof of Care (PoC) badges linked to your identity via EMR & BLE verification.")
         my_accolades = run_query("SELECT title, badge_type, timestamp, emr_verified FROM accolades WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
         if my_accolades:
             for acc in my_accolades:
                 title, b_type, ts, is_emr = acc[0], acc[1], acc[2], acc[3]
-                border_color = "#38bdf8" 
-                icon = "🛡️" 
-                emr_badge = "<span style='background:#10b981; color:#0b1120; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>✓ COMPLIANCE VERIFIED</span>"
+                border_color = "#f59e0b" if b_type == "Clinical Operator" else "#38bdf8"
+                icon = "👑" if b_type == "Clinical Operator" else "🛡️"
+                emr_badge = "<span style='background:#10b981; color:#0b1120; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>✓ EMR VERIFIED</span>" if is_emr else "<span style='background:#ef4444; color:#fff; padding:4px 8px; border-radius:6px; font-size:0.75rem; font-weight:900; letter-spacing:1px;'>PENDING</span>"
                 try: ts_str = ts.strftime('%b %d, %Y - %H:%M')
                 except: ts_str = str(ts)
                 st.markdown(f"<div style='background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(10px); border-left: 5px solid {border_color}; border-radius: 12px; padding: 18px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2);'><div><div style='font-size:1.2rem; font-weight:900; color:#f8fafc; margin-bottom: 4px;'>{icon} {title}</div><div style='color:#94a3b8; font-size:0.85rem; font-weight: 600; text-transform: uppercase;'>{b_type} <span style='color:#475569;'>•</span> {ts_str}</div></div><div style='text-align: right;'>{emr_badge}</div></div>", unsafe_allow_html=True)
         else:
-            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No Safety Audits</h3><p style='color:#64748b; font-size: 0.9rem;'>Complete physical safety checks (Crash Carts, Room Audits) to earn compliance badges.</p></div>", unsafe_allow_html=True)
+            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No Accolades Yet</h3><p style='color:#64748b; font-size: 0.9rem;'>Respond to high-acuity events to earn on-chain clinical badges.</p></div>", unsafe_allow_html=True)
