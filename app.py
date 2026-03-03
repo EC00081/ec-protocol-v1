@@ -45,15 +45,6 @@ def verify_password(plain_text_password, hashed_password):
     except Exception: return False
 def generate_zk_commitment(doc_number, pin): return hashlib.sha256(f"{doc_number}-{pin}-{os.environ.get('ZK_SECRET_SALT', 'EC_PROTOCOL_ENTERPRISE_SALT')}".encode('utf-8')).hexdigest()
 
-def verify_wallet_signature(public_key_str, signature_hex, message):
-    if not NACL_ACTIVE: return False
-    try:
-        from solders.pubkey import Pubkey
-        verify_key = nacl.signing.VerifyKey(bytes(Pubkey.from_string(public_key_str)))
-        verify_key.verify(message.encode('utf-8'), bytes.fromhex(signature_hex))
-        return True
-    except Exception as e: return False
-
 def phantom_wallet_connector():
     components.html("""
         <div style="text-align: center; font-family: 'Inter', sans-serif;">
@@ -70,18 +61,13 @@ def phantom_wallet_connector():
                     try {
                         const resp = await window.solana.connect();
                         const pubKey = resp.publicKey.toString();
-                        const msg = "Authenticate EC Protocol: " + Date.now();
-                        const encodedMessage = new TextEncoder().encode(msg);
-                        const signedMessage = await window.solana.signMessage(encodedMessage, "utf8");
-                        const sigHex = Array.from(signedMessage.signature).map(b => b.toString(16).padStart(2, '0')).join('');
-                        statusText.innerHTML = "Wallet Verified. Processing...";
-                        window.parent.postMessage({type: 'streamlit:setComponentValue', value: JSON.stringify({pubkey: pubKey, signature: sigHex, message: msg})}, '*');
-                        connectBtn.style.backgroundColor = "#10b981"; connectBtn.innerText = "Wallet Authenticated";
+                        statusText.innerHTML = "Wallet Linked! Copy your key below: <br><strong style='color:#10b981; font-size:18px; user-select: all;'>" + pubKey + "</strong>";
+                        connectBtn.style.backgroundColor = "#10b981"; connectBtn.innerText = "Wallet Connected";
                     } catch (err) { statusText.innerHTML = "Authentication cancelled."; }
                 } else { window.open('https://phantom.app/', '_blank'); statusText.innerHTML = "Please install Phantom Wallet."; }
             });
         </script>
-        """, height=140, key="phantom_auth")
+        """, height=160)
 
 # --- DATABASE ENGINE & ENTERPRISE MIGRATION ---
 @st.cache_resource
@@ -227,7 +213,7 @@ if 'user_state' not in st.session_state: st.session_state.user_state = {'active'
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.2</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.3</p><br>", unsafe_allow_html=True)
     with st.container():
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
         login_email = st.text_input("ENTERPRISE EMAIL", placeholder="name@hospital.com")
@@ -386,16 +372,18 @@ elif nav == "APPROVALS": st.info("Approvals Engine Active.")
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
     if st.button("🔄 Refresh Bank Ledger"): st.rerun()
+    
     st.markdown("### 🔗 Web3 Settlement Rail")
-    st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Sign a cryptographic message with your Phantom wallet to prove ownership.</p>", unsafe_allow_html=True)
-    phantom_auth_data = phantom_wallet_connector()
-    if phantom_auth_data:
-        try:
-            auth_payload = json.loads(phantom_auth_data)
-            if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], auth_payload['message']):
-                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin}); st.success(f"✅ Cryptographic Signature Verified! Wallet locked.")
-            else: st.error("❌ Cryptographic signature failed verification.")
-        except Exception as e: pass
+    st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Connect Phantom wallet to reveal your public key.</p>", unsafe_allow_html=True)
+    phantom_wallet_connector()
+    
+    with st.expander("Register Web3 Public Key"):
+        with st.form("web3_register"):
+            st.caption("Copy the green key generated above and paste it here to lock it to your HR profile.")
+            pub_key_input = st.text_input("Solana Public Key")
+            if st.form_submit_button("Lock Key to Vault"):
+                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": pub_key_input, "p": pin})
+                st.success(f"✅ Solana Key Registered Successfully!"); time.sleep(1.5); st.rerun()
 
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
     db_user_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
@@ -411,7 +399,8 @@ elif nav == "THE BANK":
                 net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
                 update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
                 st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury."); time.sleep(3); st.rerun()
-            else: st.error("❌ No verified Web3 Wallet found. Please authenticate above.")
+            else: st.error("❌ No verified Web3 Wallet found. Please register your key above.")
+    elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
