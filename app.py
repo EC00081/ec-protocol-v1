@@ -16,7 +16,6 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
-# --- EXTERNAL LIBRARIES ---
 try: from fpdf import FPDF; PDF_ACTIVE = True
 except ImportError: PDF_ACTIVE = False
 try: from twilio.rest import Client; TWILIO_ACTIVE = True
@@ -24,7 +23,6 @@ except ImportError: TWILIO_ACTIVE = False
 try: import nacl.signing; import nacl.encoding; NACL_ACTIVE = True
 except ImportError: NACL_ACTIVE = False
 
-# --- GLOBAL CONSTANTS ---
 TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
@@ -38,7 +36,6 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
-# --- CRYPTO & ZK PROOFS ---
 def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
@@ -53,16 +50,6 @@ def verify_wallet_signature(public_key_str, signature_hex, message):
         verify_key.verify(message.encode('utf-8'), bytes.fromhex(signature_hex))
         return True
     except Exception as e: return False
-
-# --- WEB3: ESCROW & SPLIT SETTLEMENT ---
-def lock_escrow_bounty(shift_id, rate, hours=12): run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id}); return True
-def release_escrow_bounty(shift_id, pin, user_pubkey): run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id}); return True
-def execute_split_stream_payout(pin, gross_amount, user_pubkey):
-    TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
-    tax_withheld = gross_amount * sum(TAX_RATES.values()); net_payout = gross_amount - tax_withheld; tx_base_id = int(time.time())
-    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
-    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
-    return net_payout, tax_withheld
 
 def phantom_wallet_connector():
     components.html("""
@@ -92,8 +79,7 @@ def phantom_wallet_connector():
             });
         </script>
         """, height=140, key="phantom_auth")
-    # --- DATABASE ENGINE & ENTERPRISE MIGRATION ---
-@st.cache_resource
+    @st.cache_resource
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
     if not url:
@@ -102,7 +88,7 @@ def get_db_engine():
     if not url: return None
     if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
     try:
-        engine = create_engine(url)
+        engine = create_engine(url, pool_pre_ping=True)
         with engine.connect() as conn:
             conn.execute(text("CREATE TABLE IF NOT EXISTS enterprise_users (pin TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, name TEXT, role TEXT, dept TEXT, access_level TEXT, hourly_rate NUMERIC, phone TEXT, solana_pubkey TEXT UNIQUE);"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_email ON enterprise_users(email);"))
@@ -134,22 +120,19 @@ def get_db_engine():
 def run_query(query, params=None):
     engine = get_db_engine()
     if not engine: return None
-    with engine.connect() as conn: return conn.execute(text(query), params or {}).fetchall()
+    try:
+        with engine.connect() as conn: return conn.execute(text(query), params or {}).fetchall()
+    except Exception as e: st.error(f"DB Read Error: {e}"); return None
 
 def run_transaction(query, params=None):
     engine = get_db_engine()
     if not engine: return False
-    with engine.connect() as conn: conn.execute(text(query), params or {}); conn.commit(); return True
+    try:
+        with engine.connect() as conn: conn.execute(text(query), params or {}); conn.commit(); return True
+    except Exception as e: st.error(f"DB Write Error (Transaction Refused): {e}"); return False
 
 def load_all_users():
-    """Bulletproof loader. Defaults to hardcoded dict if DB fails so you never get locked out."""
-    default_users = {
-        "1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 120.00, "vip": False, "phone": "+15551234567"},
-        "1002": {"email": "charles@ecprotocol.com", "password": "password123", "pin": "1002", "name": "Charles Morgan", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 50.00, "vip": False, "phone": None},
-        "1003": {"email": "sarah@ecprotocol.com", "password": "password123", "pin": "1003", "name": "Sarah Jenkins", "role": "Charge RRT", "dept": "Respiratory", "level": "Supervisor", "rate": 90.00, "vip": True, "phone": None},
-        "1004": {"email": "manager@ecprotocol.com", "password": "password123", "pin": "1004", "name": "David Clark", "role": "Manager", "dept": "Respiratory", "level": "Manager", "rate": 0.00, "vip": True, "phone": None},
-        "9999": {"email": "cfo@ecprotocol.com", "password": "password123", "pin": "9999", "name": "CFO VIEW", "role": "Admin", "dept": "All", "level": "Admin", "rate": 0.00, "vip": True, "phone": None}
-    }
+    default_users = {"1001": {"email": "liam@ecprotocol.com", "password": "password123", "pin": "1001", "name": "Liam O'Neil", "role": "RRT", "dept": "Respiratory", "level": "Worker", "rate": 120.00, "vip": False, "phone": "+15551234567"}}
     res = run_query("SELECT pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone FROM enterprise_users")
     if not res: return default_users
     users_dict = {}
@@ -157,15 +140,58 @@ def load_all_users():
     return users_dict
 
 USERS = load_all_users()
-def log_action(pin, action, amount, note): run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
-def update_status(pin, status, start, earn, lat=0.0, lon=0.0): return run_transaction("INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;", {"p": pin, "s": status, "t": start, "e": earn, "lat": lat, "lon": lon})
+def log_action(pin, action, amount, note): return run_transaction("INSERT INTO history (pin, action, timestamp, amount, note) VALUES (:p, :a, NOW(), :amt, :n)", {"p": pin, "a": action, "amt": amount, "n": note})
+def update_status(pin, status, start, earn, lat=0.0, lon=0.0): 
+    # Forced float casting to prevent PostgreSQL type crashes
+    return run_transaction("INSERT INTO workers (pin, status, start_time, earnings, last_active, lat, lon) VALUES (:p, :s, :t, :e, NOW(), :lat, :lon) ON CONFLICT (pin) DO UPDATE SET status = :s, start_time = :t, earnings = :e, last_active = NOW(), lat = :lat, lon = :lon;", {"p": pin, "s": status, "t": start, "e": earn, "lat": float(lat), "lon": float(lon)})
+
 def haversine_distance(lat1, lon1, lat2, lon2): R = 6371000; phi1, phi2 = math.radians(lat1), math.radians(lat2); dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1); a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2; return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
 def force_cloud_sync(pin):
     rows = run_query("SELECT status, start_time, earnings FROM workers WHERE pin = :pin", {"pin": pin})
-    if rows and len(rows) > 0: st.session_state.user_state['active'] = (rows[0][0].lower() == 'active'); st.session_state.user_state['start_time'] = float(rows[0][1]) if rows[0][1] else 0.0; st.session_state.user_state['earnings'] = float(rows[0][2]) if rows[0][2] else 0.0; return True
+    if rows and len(rows) > 0: 
+        st.session_state.user_state['active'] = (rows[0][0].lower() == 'active')
+        st.session_state.user_state['start_time'] = float(rows[0][1]) if rows[0][1] else 0.0
+        st.session_state.user_state['earnings'] = float(rows[0][2]) if rows[0][2] else 0.0
+        return True
     st.session_state.user_state['active'] = False; return False
-    # --- CSS STYLING ---
-st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+
+def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
+def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
+def execute_split_stream_payout(pin, gross_amount, user_pubkey):
+    TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
+    tax_withheld = gross_amount * sum(TAX_RATES.values()); net_payout = gross_amount - tax_withheld; tx_base_id = int(time.time())
+    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
+    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
+    return net_payout, tax_withheld
+
+def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
+    workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
+    if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
+    start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
+    distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
+    if distance_meters > GEOFENCE_RADIUS:
+        shift_gross = ((time.time() - start_time) / 3600) * USERS[pin]['rate']; final_gross = current_earnings + shift_gross
+        if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
+            log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Geofence exited ({distance_meters:.0f}m)")
+            hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
+            user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
+            if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
+            if is_sos_bounty and shift_id: release_escrow_bounty(shift_id, pin, user_pubkey); msg = f"Escrow unlocked. ${final_gross:,.2f} released."
+            else: net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey); msg = f"Auto-Cashed Out. ${net:,.2f} routed."
+            if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {msg}")
+            return True, msg
+    return False, "User still within geofence."
+
+def process_ble_beacon_ping(pin, major_floor, minor_room, rssi_signal):
+    if rssi_signal > -70: return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, last_seen) VALUES (:p, :f, :r, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room})
+    return False
+
+def check_isolation_hazard_pay(pin, isolation_room):
+    tracker = run_query("SELECT current_room FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
+    if tracker and tracker[0][0] == isolation_room: log_action(pin, "HAZARD PAY LOGGED", 15.00, f"Verified Isolation Care in {isolation_room}"); return True
+    return False
+    st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
@@ -195,35 +221,26 @@ st.markdown(html_style, unsafe_allow_html=True)
 
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
-# --- THE AUTO-HEALING AUTHENTICATOR ---
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.4.1</p><br>", unsafe_allow_html=True)
     with st.container():
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
         login_email = st.text_input("ENTERPRISE EMAIL", placeholder="name@hospital.com")
         login_password = st.text_input("SECURE PASSWORD", type="password", placeholder="••••••••")
         st.markdown("<br>", unsafe_allow_html=True)
-        
         if st.button("AUTHENTICATE CONNECTION"):
             auth_pin = None
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
-                    # Attempt 1: Verify via Bcrypt hash in DB
                     stored_hash = d.get("password_hash")
-                    if stored_hash and verify_password(login_password, stored_hash):
-                        auth_pin = p; break
-                    
-                    # Attempt 2: Auto-Heal. If user typed "password123", let them in and fix their broken DB hash.
+                    if stored_hash and verify_password(login_password, stored_hash): auth_pin = p; break
                     if login_password == "password123" or login_password == d.get("password"):
                         run_transaction("UPDATE enterprise_users SET password_hash=:pw WHERE pin=:p", {"p": p, "pw": hash_password(login_password)})
                         auth_pin = p; break
-                        
             if auth_pin:
-                st.session_state.logged_in_user = USERS[auth_pin]
-                st.session_state.pin = auth_pin
-                force_cloud_sync(auth_pin)
-                st.rerun()
+                st.session_state.logged_in_user = USERS[auth_pin]; st.session_state.pin = auth_pin
+                force_cloud_sync(auth_pin); st.rerun()
             else: st.error("❌ INVALID CREDENTIALS OR NETWORK ERROR")
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
@@ -244,10 +261,9 @@ else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROF
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
-# --- MASTER ROUTING ---
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
-    if st.button("🔄 Refresh Dashboard"): st.rerun()
+    if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
     if user['level'] in ["Manager", "Director"]:
         active_count = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")[0][0] if run_query("SELECT COUNT(*) FROM workers WHERE status='Active'") else 0
         shifts_count = run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'")[0][0] if run_query("SELECT COUNT(*) FROM marketplace WHERE status='OPEN'") else 0
@@ -264,17 +280,62 @@ if nav == "DASHBOARD":
         end_pin = st.text_input("Enter 4-Digit PIN to Clock Out", type="password", key="end_pin")
         if st.button("PUNCH OUT") and end_pin == pin:
             new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
+            # STRICT DB VALIDATION
             if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
                 st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
                 log_action(pin, "CLOCK OUT", running_earn, f"Logged {running_earn/user['rate']:.2f} hrs")
                 active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
                 if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
                 st.rerun()
+            else: st.error("❌ CRITICAL: Database refused clock-out. Please retry.")
+        
+        with st.expander("⚙️ App Simulation Engine (Test Background Pings)"):
+            st.caption("Simulate native mobile app triggers.")
+            if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
+                success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
+                if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
+            c_ble1, c_ble2 = st.columns(2)
+            if c_ble1.button("📡 Simulate BLE Ping (Enter Isolation Room 402)"): process_ble_beacon_ping(pin, "Floor 4", "ISO-402", -50); st.success("Indoor location physically verified in ISO-402")
+            if c_ble2.button("🛡️ Audit Isolation Care (Claim Hazard Pay)"):
+                if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ BLE Verified! You were physically present. $15.00 Hazard Pay Logged.")
+                else: st.error("❌ BLE Audit Failed. No tracking data found for ISO-402.")
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
-        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
-        if st.button("PUNCH IN") and start_pin == pin:
-            start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+        if not user.get('vip', False):
+            st.info("Identity verification required to initiate shift.")
+            camera_photo = st.camera_input("Take a photo to verify identity")
+            loc = get_geolocation()
+            if camera_photo and loc:
+                user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
+                fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
+                if selected_facility != "Remote/Anywhere":
+                    if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
+                        st.success(f"✅ Geofence Confirmed.")
+                        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
+                        if st.button("PUNCH IN") and start_pin == pin:
+                            start_t = time.time()
+                            # STRICT DB VALIDATION
+                            if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                                st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                            else: st.error("❌ CRITICAL: Database connection failed. Clock-in not registered.")
+                    else: st.error("❌ Geofence Failed.")
+                else:
+                    st.success("✅ Remote Check-in Authorized.")
+                    start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
+                    if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
+                        start_t = time.time()
+                        if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                            st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                        else: st.error("❌ CRITICAL: Database connection failed.")
+        else:
+            st.caption("✨ VIP Security Override Active")
+            start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
+            if st.button("PUNCH IN") and start_pin == pin:
+                start_t = time.time()
+                # STRICT DB VALIDATION
+                if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0):
+                    st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                else: st.error("❌ CRITICAL: Database transaction refused. Check Supabase connection.")
 
 elif nav == "COMMAND CENTER" and user['level'] == "Admin": st.info("Executive Command Active.")
 elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin": st.info("Forecast Active")
@@ -325,13 +386,11 @@ elif nav == "THE BANK":
     st.markdown("### 🔗 Web3 Settlement Rail")
     st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Sign a cryptographic message with your Phantom wallet to prove ownership.</p>", unsafe_allow_html=True)
     phantom_auth_data = phantom_wallet_connector()
-    
     if phantom_auth_data:
         try:
             auth_payload = json.loads(phantom_auth_data)
             if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], auth_payload['message']):
-                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
-                st.success(f"✅ Cryptographic Signature Verified! Wallet locked.")
+                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin}); st.success(f"✅ Cryptographic Signature Verified! Wallet locked.")
             else: st.error("❌ Cryptographic signature failed verification.")
         except Exception as e: pass
 
