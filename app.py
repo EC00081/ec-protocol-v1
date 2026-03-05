@@ -9,6 +9,7 @@ import json
 import bcrypt
 import hashlib
 import random
+import re
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from streamlit_js_eval import get_geolocation
@@ -30,6 +31,7 @@ TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
+OPSEC_PW_EXPIRY_DAYS = 90
 
 def send_sms(to_phone, message_body):
     if TWILIO_ACTIVE and to_phone:
@@ -39,7 +41,15 @@ def send_sms(to_phone, message_body):
         except Exception as e: return False, str(e)
     return False, "Twilio inactive."
 
-# --- CRYPTO & ZK PROOFS ---
+# --- CRYPTO & OPSEC ---
+def is_strong_password(password):
+    if len(password) < 8: return False, "Must be at least 8 characters long."
+    if not re.search(r"[A-Z]", password): return False, "Must contain an uppercase letter."
+    if not re.search(r"[a-z]", password): return False, "Must contain a lowercase letter."
+    if not re.search(r"\d", password): return False, "Must contain a number."
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password): return False, "Must contain a special character."
+    return True, "Valid"
+
 def hash_password(plain_text_password): return bcrypt.hashpw(plain_text_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 def verify_password(plain_text_password, hashed_password):
     try: return bcrypt.checkpw(plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
@@ -96,7 +106,10 @@ def get_db_engine():
     try:
         engine = create_engine(url, pool_pre_ping=True)
         with engine.connect() as conn:
-            conn.execute(text("CREATE TABLE IF NOT EXISTS enterprise_users (pin TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, name TEXT, role TEXT, dept TEXT, access_level TEXT, hourly_rate NUMERIC, phone TEXT, solana_pubkey TEXT UNIQUE);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS enterprise_users (pin TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, name TEXT, role TEXT, dept TEXT, access_level TEXT, hourly_rate NUMERIC, phone TEXT, solana_pubkey TEXT UNIQUE, last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"))
+            try: conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
+            except: pass
+            
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_email ON enterprise_users(email);"))
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
             if res[0] == 0:
@@ -107,7 +120,7 @@ def get_db_engine():
                     ("1004", "manager@ecprotocol.com", hash_password("password123"), "David Clark", "Manager", "Respiratory", "Manager", 0.00, None),
                     ("9999", "cfo@ecprotocol.com", hash_password("password123"), "CFO VIEW", "Admin", "All", "Admin", 0.00, None)
                 ]
-                for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph) ON CONFLICT DO NOTHING"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
+                for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone, last_pw_change) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph, NOW() - INTERVAL '100 days') ON CONFLICT DO NOTHING"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
             
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
@@ -127,7 +140,6 @@ def get_db_engine():
 def run_query(query, params=None):
     engine = get_db_engine(); return engine.connect().execute(text(query), params or {}).fetchall() if engine else None
 
-# Updated to return rowcount for strict concurrency locking
 def run_transaction(query, params=None):
     engine = get_db_engine()
     if engine:
@@ -138,11 +150,16 @@ def run_transaction(query, params=None):
     return 0
 
 def load_all_users():
-    # HARDENED SECURITY: Removed default password dict. Fails securely.
-    res = run_query("SELECT pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone FROM enterprise_users")
+    res = run_query("SELECT pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone, last_pw_change FROM enterprise_users")
     if not res: return {} 
     users_dict = {}
-    for r in res: users_dict[str(r[0])] = {"pin": str(r[0]), "email": r[1], "password_hash": r[2], "name": r[3], "role": r[4], "dept": r[5], "level": r[6], "rate": float(r[7]), "phone": r[8], "vip": (r[6] in ['Admin', 'Manager'])}
+    for r in res: 
+        users_dict[str(r[0])] = {
+            "pin": str(r[0]), "email": r[1], "password_hash": r[2], "name": r[3], 
+            "role": r[4], "dept": r[5], "level": r[6], "rate": float(r[7]), 
+            "phone": r[8], "vip": (r[6] in ['Admin', 'Manager']),
+            "last_pw_change": r[9]
+        }
     return users_dict
 
 USERS = load_all_users()
@@ -159,16 +176,22 @@ def force_cloud_sync(pin):
 
 def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
+
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
-    tax_withheld = gross_amount * sum(TAX_RATES.values()); net_payout = gross_amount - tax_withheld; tx_base_id = int(time.time())
+    tax_withheld = gross_amount * sum(TAX_RATES.values())
+    net_payout = gross_amount - tax_withheld
+    tx_base_id = int(time.time())
+    
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
+    
+    log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to Wallet {user_pubkey[:4]}...")
+    log_action(pin, "TAX WITHHELD", tax_withheld, f"Routed to Treasury")
     return net_payout, tax_withheld
 
 # --- HARDENED PAYROLL ENGINE ---
 def calculate_shift_differentials(start_timestamp, base_rate):
-    """Calculates overlapping time blocks to accurately apply differentials."""
     start_dt = datetime.fromtimestamp(start_timestamp, tz=LOCAL_TZ)
     end_dt = datetime.now(LOCAL_TZ)
     total_seconds = (end_dt - start_dt).total_seconds()
@@ -177,21 +200,17 @@ def calculate_shift_differentials(start_timestamp, base_rate):
     base_pay = 0.0; diff_pay = 0.0; notes = set()
     current_dt = start_dt
     
-    # Iterate through shift minute-by-minute for enterprise precision
     while current_dt < end_dt:
         minute_base = base_rate / 60.0
         minute_diff = 0.0
-        
         if current_dt.weekday() >= 5: minute_diff += (3.00 / 60.0); notes.add("WKD(+$3)")
         if current_dt.hour >= 19 or current_dt.hour < 7: minute_diff += (5.00 / 60.0); notes.add("NOC(+$5)")
-            
         base_pay += minute_base; diff_pay += minute_diff
         current_dt += timedelta(minutes=1)
         
     return base_pay, diff_pay, " | ".join(notes)
 
 def calculate_fatigue_score(p_pin, target_dept):
-    """The Equitable Fatigue Engine: Prioritizes Equality over Seniority."""
     res_hrs = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '14 days'", {"p": p_pin})
     base_rate = float(USERS.get(p_pin, {}).get('rate', 0.1))
     hrs_worked = (sum([float(r[0]) for r in res_hrs]) / base_rate) if res_hrs else 0.0
@@ -272,9 +291,34 @@ st.markdown(html_style, unsafe_allow_html=True)
 
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
 
+# --- THE ZERO-TRUST AUTHENTICATION GATE ---
+if 'pending_opsec_reset' in st.session_state:
+    st.markdown("<br><br><h1 style='text-align: center; color: #ef4444;'>SECURITY MANDATE</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #94a3b8;'>Your password has expired or is set to default. Hospital InfoSec protocols require an immediate update.</p><br>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto; border-left: 4px solid #ef4444 !important;'>", unsafe_allow_html=True)
+        with st.form("opsec_reset_form"):
+            new_pass = st.text_input("New Secure Password", type="password")
+            confirm_pass = st.text_input("Confirm Password", type="password")
+            st.caption("Must be 8+ chars, with upper, lower, number, and special character.")
+            if st.form_submit_button("Update & Unlock"):
+                if new_pass != confirm_pass: st.error("Passwords do not match.")
+                else:
+                    is_valid, msg = is_strong_password(new_pass)
+                    if not is_valid: st.error(f"Weak Password: {msg}")
+                    else:
+                        run_transaction("UPDATE enterprise_users SET password_hash=:pw, last_pw_change=NOW() WHERE pin=:p", {"p": st.session_state.pending_opsec_pin, "pw": hash_password(new_pass)})
+                        st.success("✅ Password Secured. Rerouting to dashboard...")
+                        del st.session_state.pending_opsec_reset
+                        del st.session_state.pending_opsec_pin
+                        time.sleep(2)
+                        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
+
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.6.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.7.0-Pilot</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: Secure Database Connection Offline. System Access Denied.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -286,9 +330,31 @@ if 'logged_in_user' not in st.session_state:
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
                     stored_hash = d.get("password_hash")
-                    if stored_hash and verify_password(login_password, stored_hash): auth_pin = p; break
-                    if login_password == "password123":
-                        run_transaction("UPDATE enterprise_users SET password_hash=:pw WHERE pin=:p", {"p": p, "pw": hash_password(login_password)}); auth_pin = p; break
+                    # OpSec Expiry Check
+                    pw_expired = False
+                    if d.get("last_pw_change"):
+                        try:
+                            # Safely handle datetime objects vs strings
+                            last_update = d["last_pw_change"]
+                            if isinstance(last_update, str): last_update = datetime.fromisoformat(last_update)
+                            if last_update.tzinfo is None: last_update = last_update.replace(tzinfo=pytz.UTC)
+                            if (datetime.now(pytz.UTC) - last_update).days >= OPSEC_PW_EXPIRY_DAYS: pw_expired = True
+                        except: pass 
+                    
+                    is_default = (login_password == "password123")
+                    
+                    if stored_hash and verify_password(login_password, stored_hash): 
+                        if is_default or pw_expired:
+                            st.session_state.pending_opsec_reset = True
+                            st.session_state.pending_opsec_pin = p
+                            st.rerun()
+                        else: auth_pin = p; break
+                        
+                    if is_default and not stored_hash: # Fallback for initial seed
+                        st.session_state.pending_opsec_reset = True
+                        st.session_state.pending_opsec_pin = p
+                        st.rerun()
+                        
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]; st.session_state.pin = auth_pin
                 force_cloud_sync(auth_pin); st.rerun()
@@ -314,6 +380,7 @@ st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; m
 
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
+    st.caption("ℹ️ PILOT MODE: Payouts represent 'Shadow Ledger' metrics. No live USDC is transmitted during the 30-day trial.")
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
     if user['level'] in ["Manager", "Director", "Supervisor"]:
         active_count = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")[0][0] if run_query("SELECT COUNT(*) FROM workers WHERE status='Active'") else 0
@@ -485,7 +552,6 @@ elif nav == "MARKETPLACE":
             s_id, s_role, s_date, s_time, s_rate, s_escrow = shift[0], shift[1], shift[2], shift[3], float(shift[4]), shift[5]
             est_payout = s_rate * 12; escrow_badge = "<span style='background:#10b981; color:#0b1120; padding:3px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-left:10px;'>🔒 ESCROW SECURED</span>" if s_escrow == "LOCKED" else ""
             st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f}</div></div></div></div>", unsafe_allow_html=True)
-            # STRICT CONCURRENCY ROW LOCK
             if st.button(f"⚡ CLAIM THIS SHIFT (${est_payout:,.0f})", key=f"claim_{s_id}"):
                 rows_updated = run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id AND status='OPEN'", {"p": pin, "id": s_id})
                 if rows_updated > 0:
@@ -567,6 +633,7 @@ elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
     st.caption("Review Timesheet Exceptions and Time Off Requests.")
     if st.button("🔄 Refresh Queue"): st.rerun()
+    
     if user['level'] == "Admin":
         pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
         if pending_cfo:
@@ -578,16 +645,26 @@ elif nav == "APPROVALS":
         else: st.info("No funds pending authorization.")
     else:
         tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
+        
         with tab_fin:
             pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
             if pending_mgr:
                 with st.form("batch_verify_form"):
-                    selections = {tx[0]: st.checkbox(f"**{USERS.get(str(tx[1]), {}).get('name')}** — ${float(tx[2]):,.2f}") for tx in pending_mgr}
+                    selections = {}
+                    for tx in pending_mgr:
+                        u_name = USERS.get(str(tx[1]), {}).get('name', 'Unknown')
+                        last_shift = run_query("SELECT note, timestamp FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 1", {"p": tx[1]})
+                        shift_context = last_shift[0][0] if last_shift else "No recent shift context."
+                        
+                        checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | (Context: {shift_context})"
+                        selections[tx[0]] = st.checkbox(checkbox_label)
+                        
                     if st.form_submit_button("☑️ BATCH VERIFY SELECTED"):
                         for t_id, is_sel in selections.items():
                             if is_sel: run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id", {"id": t_id})
                         st.success("✅ Pushed to Treasury."); time.sleep(1.5); st.rerun()
             else: st.info("No shift exceptions pending.")
+            
         with tab_pto:
             pending_pto = run_query("SELECT req_id, pin, start_date, end_date FROM pto_requests WHERE status='PENDING'")
             if pending_pto:
@@ -597,9 +674,10 @@ elif nav == "APPROVALS":
 
 elif nav == "THE BANK":
     st.markdown("## 🏦 The Bank")
+    st.caption("ℹ️ SHADOW LEDGER MODE: Payouts are simulated for pilot metrics tracking. No live Web3 routing occurs.")
     if st.button("🔄 Refresh Bank Ledger"): st.rerun()
     st.markdown("### 🔗 Web3 Settlement Rail")
-    st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Authenticate with Phantom to generate your cryptographic signature.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#94a3b8; font-size:0.9rem;'>Authenticate with Phantom to generate your cryptographic signature. <br><b>Mobile Users:</b> You must open this dashboard inside the Phantom App browser.</p>", unsafe_allow_html=True)
     phantom_wallet_connector()
     
     with st.expander("🔐 Verify & Lock Wallet Signature", expanded=True):
@@ -610,7 +688,8 @@ elif nav == "THE BANK":
                 try:
                     auth_payload = json.loads(manual_payload_input)
                     if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], auth_payload['message']):
-                        run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin}); st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
+                        run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
+                        st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
                     else: st.error("❌ Cryptographic signature failed verification.")
                 except Exception as e: st.error("Invalid Payload Format. Please ensure you copied the entire JSON string.")
 
@@ -623,12 +702,19 @@ elif nav == "THE BANK":
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
-        if st.button("⚡ EXECUTE ATOMIC PAYOUT", key="web3_btn", use_container_width=True):
+        if st.button("⚡ EXECUTE ATOMIC PAYOUT", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
+            st.session_state['payout_processing'] = True
             if solana_key:
                 net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
-                update_status(pin, "Inactive", 0, 0.0); st.session_state.user_state['earnings'] = 0.0
-                st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury."); time.sleep(3); st.rerun()
-            else: st.error("❌ No verified Web3 Wallet found. Please authenticate above.")
+                update_status(pin, "Inactive", 0, 0.0)
+                st.session_state.user_state['earnings'] = 0.0
+                st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury.")
+                time.sleep(2.5) 
+                st.session_state['payout_processing'] = False
+                st.rerun()
+            else: 
+                st.error("❌ No verified Web3 Wallet found. Please authenticate above.")
+                st.session_state['payout_processing'] = False
     elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
 
 elif nav == "MY PROFILE":
@@ -637,15 +723,29 @@ elif nav == "MY PROFILE":
     
     with t_sec:
         st.markdown("### Account Security (Bcrypt)")
+        
+        # Display current OpSec status
+        st.info(f"Enterprise mandates password rotation every {OPSEC_PW_EXPIRY_DAYS} days.")
+        
         with st.form("update_password_form"):
-            current_pw = st.text_input("Current Password", type="password"); new_pw = st.text_input("New Password", type="password"); confirm_pw = st.text_input("Confirm New Password", type="password")
+            current_pw = st.text_input("Current Password", type="password"); new_pw = st.text_input("New Secure Password", type="password"); confirm_pw = st.text_input("Confirm New Password", type="password")
+            st.caption("Must be 8+ chars, with upper, lower, number, and special character.")
             if st.form_submit_button("Update Password"):
-                run_transaction("UPDATE enterprise_users SET password_hash=:pw WHERE pin=:p", {"p": pin, "pw": hash_password(new_pw)})
-                st.success("✅ Password encrypted and updated!"); time.sleep(2); st.rerun()
+                db_pw_res = run_query("SELECT password_hash FROM enterprise_users WHERE pin=:p", {"p": pin})
+                if db_pw_res and verify_password(current_pw, db_pw_res[0][0]):
+                    if new_pw != confirm_pw: st.error("❌ Passwords do not match.")
+                    else:
+                        is_valid, msg = is_strong_password(new_pw)
+                        if not is_valid: st.error(f"❌ Weak Password: {msg}")
+                        else:
+                            run_transaction("UPDATE enterprise_users SET password_hash=:pw, last_pw_change=NOW() WHERE pin=:p", {"p": pin, "pw": hash_password(new_pw)})
+                            st.success("✅ Password encrypted and updated! Clock reset."); time.sleep(2); st.rerun()
+                else: st.error("❌ Current password incorrect.")
+                
     with t_lic:
         with st.expander("➕ ADD NEW CREDENTIAL"):
             with st.form("cred_form"):
-                doc_type = st.selectbox("Document Type", ["State RN License", "State RRT License"])
+                doc_type = st.selectbox("Document Type", ["State RN License", "State RRT License", "ACLS Provider", "BLS Provider"])
                 doc_num = st.text_input("License Number"); exp_date = st.date_input("Expiration Date")
                 if st.form_submit_button("Save Credential"):
                     run_transaction("INSERT INTO credentials (doc_id, pin, doc_type, doc_number, exp_date, status) VALUES (:id, :p, :dt, :dn, :ed, 'ACTIVE')", {"id": f"DOC-{int(time.time())}", "p": pin, "dt": doc_type, "dn": generate_zk_commitment(doc_num, pin), "ed": str(exp_date)})
