@@ -32,6 +32,7 @@ LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
 OPSEC_PW_EXPIRY_DAYS = 90
+OVERTIME_THRESHOLD_HRS = 12.25 # Safety Valve: Any shift over 12h15m is flagged for manual review
 
 def send_sms(to_phone, message_body):
     if TWILIO_ACTIVE and to_phone:
@@ -186,16 +187,13 @@ def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
     
+    # PATCH: Explicit Ledger History Logging
     log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to Wallet {user_pubkey[:4]}...")
     log_action(pin, "TAX WITHHELD", tax_withheld, f"Routed to Treasury")
     return net_payout, tax_withheld
 
 # --- 🚀 THE ADP-STYLE CONTINUOUS DIFFERENTIAL ENGINE ---
 def calculate_shift_differentials(start_timestamp, base_rate):
-    """
-    Slices a continuous shift into literal minutes to perfectly stack Base, Evening, Night, and Weekend modifiers 
-    without requiring the worker to clock out and clock back in.
-    """
     start_dt = datetime.fromtimestamp(start_timestamp, tz=LOCAL_TZ)
     end_dt = datetime.now(LOCAL_TZ)
     total_seconds = (end_dt - start_dt).total_seconds()
@@ -207,24 +205,14 @@ def calculate_shift_differentials(start_timestamp, base_rate):
     while current_dt < end_dt:
         minute_base = base_rate / 60.0
         minute_diff = 0.0
-        
-        # 1. Weekend Logic (Saturday & Sunday Calendar Days)
-        if current_dt.weekday() >= 5: 
-            minute_diff += (3.00 / 60.0)
-            notes.add("WKD(+$3)")
-            
-        # 2. Time-of-Day Logic (Day vs Evening vs Night)
-        if 15 <= current_dt.hour < 19: 
-            minute_diff += (3.00 / 60.0) # Evening: 3pm to 7pm
-            notes.add("EVE(+$3)")
-        elif current_dt.hour >= 19 or current_dt.hour < 7: 
-            minute_diff += (5.00 / 60.0) # Night: 7pm to 7am
-            notes.add("NOC(+$5)")
-            
+        if current_dt.weekday() >= 5: minute_diff += (3.00 / 60.0); notes.add("WKD(+$3)")
+        if 15 <= current_dt.hour < 19: minute_diff += (3.00 / 60.0); notes.add("EVE(+$3)")
+        elif current_dt.hour >= 19 or current_dt.hour < 7: minute_diff += (5.00 / 60.0); notes.add("NOC(+$5)")
         base_pay += minute_base; diff_pay += minute_diff
         current_dt += timedelta(minutes=1)
         
-    return base_pay, diff_pay, " | ".join(notes)
+    # PATCH: Floating Point Ledger Fix
+    return round(base_pay, 2), round(diff_pay, 2), " | ".join(notes)
 
 def calculate_fatigue_score(p_pin, target_dept):
     res_hrs = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '14 days'", {"p": p_pin})
@@ -232,10 +220,8 @@ def calculate_fatigue_score(p_pin, target_dept):
     hrs_worked = (sum([float(r[0]) for r in res_hrs]) / base_rate) if res_hrs else 0.0
     score = hrs_worked 
     notes = []
-    
     current_weekday = date.today().weekday()
     if current_weekday >= 5: 
-        # PATCH: Explicit Timezone casting for exact day-of-week logic in Postgres
         res_wknds = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND extract(isodow from timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST') >= 6 AND timestamp >= NOW() - INTERVAL '30 days'", {"p": p_pin})
         if res_wknds and res_wknds[0][0] > 1: score += 50.0; notes.append(f"Weekend Equality (Worked {res_wknds[0][0]} recently)")
     
@@ -252,19 +238,33 @@ def process_background_location_ping(pin, current_lat, current_lon, shift_id=Non
     workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
     if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
     start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
+    
+    shift_duration_hours = (time.time() - start_time) / 3600
+    if shift_duration_hours > 18:
+        return False, "18-Hour Kill Switch Activated. Ledger Frozen."
+        
     distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
     if distance_meters > GEOFENCE_RADIUS:
         base_pay, diff_pay, diff_notes = calculate_shift_differentials(start_time, USERS[pin]['rate'])
         shift_gross = base_pay + diff_pay; final_gross = current_earnings + shift_gross
-        if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
-            log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [{diff_notes}]")
-            hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
-            user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
-            if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
-            if is_sos_bounty and shift_id: release_escrow_bounty(shift_id, pin, user_pubkey); msg = f"Escrow unlocked. ${final_gross:,.2f} released."
-            else: net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey); msg = f"Auto-Cashed Out. ${net:,.2f} routed."
-            if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {msg}")
-            return True, msg
+        
+        # PATCH: Autonomous Overtime Escrow Gate
+        if shift_duration_hours > OVERTIME_THRESHOLD_HRS:
+            if update_status(pin, "Inactive", 0, current_earnings, current_lat, current_lon): # Do not add to withdrawable pool
+                run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, tx_type) VALUES (:id, :p, :amt, 'PENDING_MGR', 'OVERTIME_REVIEW')", {"id": f"TX-OT-{int(time.time())}", "p": pin, "amt": shift_gross})
+                log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [OVERTIME HELD]")
+                if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift > {OVERTIME_THRESHOLD_HRS}h. ${shift_gross:.2f} held in Escrow pending CFO review.")
+                return True, f"Overtime Escrow Locked. ${shift_gross:.2f} held for review."
+        else:
+            if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
+                log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [{diff_notes}]")
+                hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
+                user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
+                if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
+                if is_sos_bounty and shift_id: release_escrow_bounty(shift_id, pin, user_pubkey); msg = f"Escrow unlocked. ${final_gross:,.2f} released."
+                else: net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey); msg = f"Auto-Cashed Out. ${net:,.2f} routed."
+                if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {msg}")
+                return True, msg
     return False, "User still within geofence."
 
 def log_indoor_presence(pin, major_floor, minor_room, scan_method="BLE"): return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, scan_method, last_seen) VALUES (:p, :f, :r, :sm, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, scan_method=:sm, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room, "sm": scan_method})
@@ -334,7 +334,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.1-Pilot</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.0.0-Pilot</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: Secure Database Connection Offline. System Access Denied.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -405,9 +405,16 @@ if nav == "DASHBOARD":
     active = st.session_state.user_state.get('active', False)
     running_earn = 0.0; display_gross = 0.0
     if active:
-        base_pay, diff_pay, diff_str = calculate_shift_differentials(st.session_state.user_state['start_time'], user['rate'])
-        running_earn = base_pay + diff_pay
-        if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
+        shift_duration_hours = (time.time() - st.session_state.user_state['start_time']) / 3600
+        # PATCH 1: 18-Hour Kill Switch
+        if shift_duration_hours > 18:
+            st.error("🛑 CRITICAL: Maximum shift duration (18h) exceeded. Ledger frozen. Please contact your manager to manually reconcile your clock-out time.")
+            running_earn = 0.0
+        else:
+            base_pay, diff_pay, diff_str = calculate_shift_differentials(st.session_state.user_state['start_time'], user['rate'])
+            running_earn = base_pay + diff_pay
+            if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
+            
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
     c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross * (1 - sum(TAX_RATES.values())):,.2f}")
     st.markdown("<br>", unsafe_allow_html=True)
@@ -415,17 +422,32 @@ if nav == "DASHBOARD":
     if active:
         end_pin = st.text_input("Enter 4-Digit PIN to Clock Out", type="password", key="end_pin")
         if st.button("PUNCH OUT") and end_pin == pin:
-            new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
-            if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
-                st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
+            shift_duration_hours = (time.time() - st.session_state.user_state['start_time']) / 3600
+            
+            if shift_duration_hours > 18:
+                st.error("🛑 Ledger frozen. Shift exceeds 18-hour safety limit. Manager intervention required.")
+            else:
                 base_pay, diff_pay, diff_str = calculate_shift_differentials(st.session_state.user_state['start_time'], user['rate'])
-                log_action(pin, "CLOCK OUT", running_earn, f"Shift Ended" + (f" [{diff_str}]" if diff_pay > 0 else ""))
-                active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
-                if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
-                st.rerun()
-            else: st.error("❌ CRITICAL: Database refused clock-out.")
+                
+                # OVERTIME SAFETY VALVE
+                if shift_duration_hours > OVERTIME_THRESHOLD_HRS:
+                    if update_status(pin, "Inactive", 0, st.session_state.user_state.get('earnings', 0.0), 0.0, 0.0): # Do not add to withdrawable pool
+                        run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, tx_type) VALUES (:id, :p, :amt, 'PENDING_MGR', 'OVERTIME_REVIEW')", {"id": f"TX-OT-{int(time.time())}", "p": pin, "amt": running_earn})
+                        log_action(pin, "CLOCK OUT", running_earn, f"Shift Ended (OVERTIME HELD) [{diff_str}]")
+                        st.session_state.user_state['active'] = False
+                        st.warning(f"⚠️ Shift exceeded scheduled limits ({shift_duration_hours:.1f} hrs). Funds (${running_earn:.2f}) held in Escrow pending Manager & CFO clearance.")
+                        time.sleep(4); st.rerun()
+                else:
+                    # STANDARD SHIFT
+                    new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
+                    if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
+                        st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
+                        log_action(pin, "CLOCK OUT", running_earn, f"Shift Ended [{diff_str}]")
+                        active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
+                        if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
+                        st.rerun()
+                    else: st.error("❌ CRITICAL: Database refused clock-out.")
         
-        # PATCH 1: RBAC Security Lock for the Simulation Engine
         if user['level'] in ["Admin", "Manager", "Supervisor"]:
             with st.expander("⚙️ PILOT ADMIN: App Simulation Engine (Equipment & EMR Triggers)"):
                 st.caption("Simulate native mobile app triggers. Restricted to Command Level access.")
@@ -456,24 +478,28 @@ if nav == "DASHBOARD":
             loc = get_geolocation()
             
             if camera_photo:
-                # PATCH 2: Graceful Degradation for GPS Failure
                 if loc:
-                    user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
-                    fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
-                    if selected_facility != "Remote/Anywhere":
-                        if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
-                            st.success(f"✅ Geofence Confirmed.")
-                            start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
-                            if st.button("PUNCH IN") and start_pin == pin:
-                                start_t = time.time()
-                                if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
-                                    st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                        else: st.error("❌ Geofence Failed.")
+                    # PATCH 2: Cryptographic GPS Accuracy Check
+                    gps_accuracy = loc['coords'].get('accuracy', 9999)
+                    if gps_accuracy > 200:
+                        st.error(f"📡 GPS Signal too broad (Accuracy: {gps_accuracy:.0f}m). Please connect to hospital Wi-Fi or move near a window to prevent spoofing.")
                     else:
-                        st.success("✅ Remote Check-in Authorized.")
-                        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
-                        if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
-                            start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                        user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
+                        fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
+                        if selected_facility != "Remote/Anywhere":
+                            if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
+                                st.success(f"✅ Geofence Confirmed.")
+                                start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
+                                if st.button("PUNCH IN") and start_pin == pin:
+                                    start_t = time.time()
+                                    if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                                        st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                            else: st.error("❌ Geofence Failed.")
+                        else:
+                            st.success("✅ Remote Check-in Authorized.")
+                            start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
+                            if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
+                                start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
                 else:
                     st.error("📡 GPS Signal Denied or Unavailable. Please enable Location Services in your device browser settings to verify facility presence.")
         else:
@@ -669,7 +695,7 @@ elif nav == "SCHEDULE":
 
 elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
-    st.caption("Review Timesheet Exceptions and Time Off Requests.")
+    st.caption("Review Timesheet Exceptions, Overtime Escrows, and Time Off Requests.")
     if st.button("🔄 Refresh Queue"): st.rerun()
     
     if user['level'] == "Admin":
@@ -678,32 +704,46 @@ elif nav == "APPROVALS":
             for tx in pending_cfo:
                 st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4>{USERS.get(str(tx[1]), {}).get('name', 'Unknown')} | ${float(tx[2]):,.2f}</h4></div>", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
-                if c1.button("💸 RELEASE FUNDS", key=f"cfo_{tx[0]}"): 
-                    updated = run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id AND status='PENDING_CFO'", {"id": tx[0]})
-                    if updated: st.success("Approved!"); st.rerun()
-                    else: st.error("Transaction state changed. Please refresh."); time.sleep(2); st.rerun()
+                if c1.button("💸 RELEASE FUNDS TO WEB3", key=f"cfo_{tx[0]}"): 
+                    # CFO Trigger: Route to blockchain
+                    user_pubkey_res = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": tx[1]})
+                    user_pubkey = user_pubkey_res[0][0] if user_pubkey_res and user_pubkey_res[0][0] else None
+                    if user_pubkey:
+                        net, tax = execute_split_stream_payout(tx[1], float(tx[2]), user_pubkey)
+                        run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id AND status='PENDING_CFO'", {"id": tx[0]})
+                        st.success(f"✅ Approved! ${net:.2f} routed to Solana.")
+                    else:
+                        # Fallback for unlinked workers
+                        st.warning("User lacks a Web3 wallet. Funds routed to internal bank ledger.")
+                        run_transaction("UPDATE workers SET earnings = earnings + :amt WHERE pin=:p", {"amt": float(tx[2]), "p": tx[1]})
+                        run_transaction("UPDATE transactions SET status='APPROVED_INTERNAL' WHERE tx_id=:id", {"id": tx[0]})
+                    time.sleep(2); st.rerun()
                 if c2.button("❌ DENY", key=f"den_{tx[0]}"): 
                     run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
-        else: st.info("No funds pending authorization.")
+        else: st.info("No funds pending CFO authorization.")
     else:
         tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
         
         with tab_fin:
-            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
+            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp, tx_type FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
             if pending_mgr:
                 with st.form("batch_verify_form"):
                     selections = {}
                     for tx in pending_mgr:
                         u_name = USERS.get(str(tx[1]), {}).get('name', 'Unknown')
+                        tx_type_str = "OVERTIME/FRAUD REVIEW" if tx[4] == 'OVERTIME_REVIEW' else "STANDARD SHIFT"
+                        
+                        # Fetch recent context for manager
                         last_shift = run_query("SELECT note, timestamp FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 1", {"p": tx[1]})
                         shift_context = last_shift[0][0] if last_shift else "No recent shift context."
-                        checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | (Context: {shift_context})"
+                        
+                        checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | **{tx_type_str}** | (Context: {shift_context})"
                         selections[tx[0]] = st.checkbox(checkbox_label)
                         
                     if st.form_submit_button("☑️ BATCH VERIFY SELECTED"):
                         for t_id, is_sel in selections.items():
                             if is_sel: run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id AND status='PENDING_MGR'", {"id": t_id})
-                        st.success("✅ Pushed to Treasury."); time.sleep(1.5); st.rerun()
+                        st.success("✅ Overtime Verified. Pushed to CFO Treasury."); time.sleep(1.5); st.rerun()
             else: st.info("No shift exceptions pending.")
             
         with tab_pto:
@@ -724,10 +764,10 @@ elif nav == "THE BANK":
     with st.expander("🔐 Verify & Lock Wallet Signature", expanded=True):
         with st.form("verify_signature_form"):
             st.info("Paste the generated JSON payload from the Phantom module above.")
-            manual_payload_input = st.text_input("Signature Payload (JSON)")
+            # PATCH 3: Multi-line Text Area UX Fix
+            manual_payload_input = st.text_area("Signature Payload (JSON)", height=100)
             if st.form_submit_button("Verify & Lock to Profile"):
                 try:
-                    # PATCH 4: Input Sanitization to prevent JSONDecodeError from mobile pasting
                     clean_input = manual_payload_input.strip()
                     if not clean_input:
                         st.error("❌ Please provide a payload.")
@@ -737,7 +777,7 @@ elif nav == "THE BANK":
                         if msg_text.startswith("Authenticate EC Protocol | Nonce: "):
                             msg_time = int(msg_text.split("Nonce: ")[1])
                             current_time = int(time.time() * 1000)
-                            if (current_time - msg_time) < 300000: # 5 Minute expiry
+                            if (current_time - msg_time) < 300000:
                                 if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], msg_text):
                                     run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
                                     st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
