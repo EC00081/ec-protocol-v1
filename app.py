@@ -108,8 +108,8 @@ def get_db_engine():
     try:
         engine = create_engine(url, pool_pre_ping=True)
         with engine.connect() as conn:
-            # FIX: Removed ALTER TABLE entirely and added explicit commits to prevent InFailedSqlTransaction aborts
             conn.execute(text("CREATE TABLE IF NOT EXISTS enterprise_users (pin TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, name TEXT, role TEXT, dept TEXT, access_level TEXT, hourly_rate NUMERIC, phone TEXT, solana_pubkey TEXT UNIQUE, last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"))
+            conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN IF NOT EXISTS last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
             conn.commit() 
             
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_email ON enterprise_users(email);"))
@@ -138,6 +138,9 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
+            
+            # Database update to support transaction notes
+            conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS note TEXT;"))
             conn.commit()
         return engine
     except Exception as e: 
@@ -193,10 +196,12 @@ def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     net_payout = gross_amount - tax_withheld
     tx_base_id = int(time.time())
     
-    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": user_pubkey})
+    dest_pubkey = user_pubkey if user_pubkey else "FIAT_DIRECT_DEPOSIT"
+    
+    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": dest_pubkey})
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
     
-    log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to Wallet {user_pubkey[:4]}...")
+    log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to {dest_pubkey[:12]}...")
     log_action(pin, "TAX WITHHELD", tax_withheld, f"Routed to Treasury")
     return net_payout, tax_withheld
 
@@ -306,7 +311,6 @@ if isinstance(engine_status, str):
         st.error("**CRITICAL ERROR:** The `SUPABASE_URL` environment variable is completely missing from Render.")
     else:
         st.error(f"**RAW DATABASE ERROR LOG:**\n\n{engine_status}")
-        st.info("**HOW TO FIX THIS INSTANTLY:**\n\n1. **The Special Character Trap (Most Likely):** If your Supabase password has an `@`, `#`, `:`, or `/` in it, Python reads the URL wrong and crashes. Go to Supabase, change your password to ONLY letters and numbers (e.g., `Password2026`), update the variable in Render, and restart.\n2. **Missing Dependencies:** Ensure `psycopg2-binary` is spelled exactly like that inside your `requirements.txt` file.")
     st.stop()
 
 USERS = load_all_users()
@@ -339,7 +343,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.3-Stable</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.4-Stable</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -518,7 +522,7 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                         log_action(w_pin, "CLOCK OUT", base_pay+diff_pay, f"Manager Forced Clock Out" + (f" [{diff_str}]" if diff_pay > 0 else ""))
                         hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": w_pin})
                         user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
-                        if user_pubkey: execute_split_stream_payout(w_pin, est_gross, user_pubkey)
+                        execute_split_stream_payout(w_pin, est_gross, user_pubkey)
                         st.success(f"✅ Successfully clocked out {w_name}."); time.sleep(2); st.rerun()
                 if w_lat and w_lon: map_data.append({"name": w_name, "lat": float(w_lat), "lon": float(w_lon)})
             if map_data: st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame(map_data), get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100)], initial_view_state=pdk.ViewState(latitude=pd.DataFrame(map_data)['lat'].mean(), longitude=pd.DataFrame(map_data)['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
@@ -592,8 +596,9 @@ elif nav == "MARKETPLACE":
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
-    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_mine, tab_hist, tab_master, tab_ai = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER"])
-    else: tab_mine, tab_hist, tab_master = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER"])
+    
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_mine, tab_hist, tab_master, tab_ai, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER", "🏝️ REQUEST PTO"])
+    else: tab_mine, tab_hist, tab_master, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🏝️ REQUEST PTO"])
         
     with tab_mine:
         my_scheds = run_query("SELECT shift_id, shift_date, shift_time, COALESCE(status, 'SCHEDULED') FROM schedules WHERE pin=:p AND shift_date >= :today ORDER BY shift_date ASC", {"p": pin, "today": str(date.today())})
@@ -624,6 +629,13 @@ elif nav == "SCHEDULE":
                 for s in groups[date_key]:
                     owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
                     st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
+                    # 🚀 NEW: Manager Schedule Edit Buttons
+                    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
+                        m1, m2, m3 = st.columns([2, 2, 8])
+                        if m1.button("❌ Remove", key=f"del_{s[0]}", use_container_width=True):
+                            run_transaction("DELETE FROM schedules WHERE shift_id=:id", {"id": s[0]}); st.rerun()
+                        if m2.button("📋 Duplicate", key=f"dup_{s[0]}", use_container_width=True):
+                            run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:nid, :p, :d, :t, :dept, 'SCHEDULED')", {"nid": f"SCH-{int(time.time()*1000)}{random.randint(10,99)}", "p": s[1], "d": s[2], "t": s[3], "dept": s[4]}); st.rerun()
         else: st.info("Master calendar is empty for upcoming dates.")
 
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
@@ -656,6 +668,19 @@ elif nav == "SCHEDULE":
                         if st.form_submit_button("🚨 FORCE DISPATCH"):
                             target_p = override_pin.split(" - ")[0]
                             run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": target_p, "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success("✅ Override Authorized."); del st.session_state.ai_date; time.sleep(2); st.rerun()
+    
+    # 🚀 NEW: Restored PTO Request Tab
+    with tab_pto:
+        st.markdown("### Request Paid Time Off")
+        with st.form("pto_form"):
+            c1, c2 = st.columns(2)
+            start_d = c1.date_input("Start Date")
+            end_d = c2.date_input("End Date")
+            reason = st.text_input("Reason")
+            if st.form_submit_button("Submit PTO Request"):
+                run_transaction("INSERT INTO pto_requests (req_id, pin, start_date, end_date, reason) VALUES (:id, :p, :sd, :ed, :r)", {"id": f"PTO-{int(time.time()*1000)}", "p": pin, "sd": str(start_d), "ed": str(end_d), "r": reason})
+                st.success("✅ PTO Request sent to management.")
+                time.sleep(1.5); st.rerun()
 
 elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
@@ -663,14 +688,17 @@ elif nav == "APPROVALS":
     if st.button("🔄 Refresh Queue"): st.rerun()
     
     if user['level'] == "Admin":
-        pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
+        pending_cfo = run_query("SELECT tx_id, pin, amount, timestamp, note FROM transactions WHERE status='PENDING_CFO' ORDER BY timestamp ASC")
         if pending_cfo:
             for tx in pending_cfo:
-                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4>{USERS.get(str(tx[1]), {}).get('name', 'Unknown')} | ${float(tx[2]):,.2f}</h4></div>", unsafe_allow_html=True)
+                tx_note = tx[4] if len(tx) > 4 and tx[4] else "No context provided"
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4>{USERS.get(str(tx[1]), {}).get('name', 'Unknown')} | ${float(tx[2]):,.2f}</h4><p style='color:#94a3b8; font-size:0.9rem;'>{tx_note}</p></div>", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
                 if c1.button("💸 RELEASE FUNDS", key=f"cfo_{tx[0]}"): 
                     updated = run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id AND status='PENDING_CFO'", {"id": tx[0]})
-                    if updated: st.success("Approved!"); st.rerun()
+                    if updated: 
+                        log_action(tx[1], "MANUAL PAYOUT RELEASED", tx[2], f"Approved Exception: {tx_note}")
+                        st.success("Approved!"); st.rerun()
                     else: st.error("Transaction state changed. Please refresh."); time.sleep(2); st.rerun()
                 if c2.button("❌ DENY", key=f"den_{tx[0]}"): 
                     run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
@@ -679,15 +707,14 @@ elif nav == "APPROVALS":
         tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
         
         with tab_fin:
-            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
+            pending_mgr = run_query("SELECT tx_id, pin, amount, timestamp, note FROM transactions WHERE status='PENDING_MGR' ORDER BY timestamp ASC")
             if pending_mgr:
                 with st.form("batch_verify_form"):
                     selections = {}
                     for tx in pending_mgr:
                         u_name = USERS.get(str(tx[1]), {}).get('name', 'Unknown')
-                        last_shift = run_query("SELECT note, timestamp FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 1", {"p": tx[1]})
-                        shift_context = last_shift[0][0] if last_shift else "No recent shift context."
-                        checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | (Context: {shift_context})"
+                        tx_note = tx[4] if len(tx) > 4 and tx[4] else "No recent shift context."
+                        checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | (Context: {tx_note})"
                         selections[tx[0]] = st.checkbox(checkbox_label)
                         
                     if st.form_submit_button("☑️ BATCH VERIFY SELECTED"):
@@ -697,10 +724,12 @@ elif nav == "APPROVALS":
             else: st.info("No shift exceptions pending.")
             
         with tab_pto:
-            pending_pto = run_query("SELECT req_id, pin, start_date, end_date FROM pto_requests WHERE status='PENDING'")
+            pending_pto = run_query("SELECT req_id, pin, start_date, end_date, reason FROM pto_requests WHERE status='PENDING'")
             if pending_pto:
                 for p in pending_pto:
-                    if st.button(f"APPROVE PTO: {USERS.get(str(p[1]), {}).get('name')} ({p[2]} to {p[3]})", key=p[0]): run_transaction("UPDATE pto_requests SET status='APPROVED' WHERE req_id=:id", {"id": p[0]}); st.rerun()
+                    reason = p[4] if len(p) > 4 and p[4] else "No reason given."
+                    if st.button(f"APPROVE PTO: {USERS.get(str(p[1]), {}).get('name')} ({p[2]} to {p[3]}) | Reason: {reason}", key=p[0]): 
+                        run_transaction("UPDATE pto_requests SET status='APPROVED' WHERE req_id=:id", {"id": p[0]}); st.rerun()
             else: st.info("No pending PTO requests.")
 
 elif nav == "THE BANK":
@@ -740,20 +769,35 @@ elif nav == "THE BANK":
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
-        if st.button("⚡ EXECUTE ATOMIC PAYOUT", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
+        # 🚀 NEW: Web3 Bypass (Fiat Fallback)
+        if st.button("⚡ EXECUTE PAYOUT (Web3 / Fiat Fallback)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
             st.session_state['payout_processing'] = True
-            if solana_key:
-                net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
-                update_status(pin, "Inactive", 0, 0.0)
-                st.session_state.user_state['earnings'] = 0.0
-                st.success(f"✅ Atomic Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury.")
-                time.sleep(2.5) 
-                st.session_state['payout_processing'] = False
-                st.rerun()
-            else: 
-                st.error("❌ No verified Web3 Wallet found. Please authenticate above.")
-                st.session_state['payout_processing'] = False
+            net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
+            update_status(pin, "Inactive", 0, 0.0)
+            st.session_state.user_state['earnings'] = 0.0
+            
+            dest_txt = f"Wallet {solana_key[:4]}..." if solana_key else "Fiat Direct Deposit"
+            st.success(f"✅ Settlement Complete! ${net:,.2f} routed to {dest_txt} | ${tax:,.2f} routed to Tax Treasury.")
+            time.sleep(2.5) 
+            st.session_state['payout_processing'] = False
+            st.rerun()
     elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
+
+    # 🚀 NEW: Manual Exception Submissions
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+    with st.expander("🛠️ Submit Exception / Overtime Hours"):
+        st.caption("Submit extra hours worked outside your normal schedule for manager approval.")
+        with st.form("exception_form"):
+            exc_date = st.date_input("Date of Shift")
+            exc_hours = st.number_input("Additional Hours", min_value=0.5, step=0.5)
+            exc_reason = st.text_input("Reason (e.g., 'Stayed late for Code Blue')")
+            if st.form_submit_button("Submit to Manager"):
+                amt = exc_hours * user['rate']
+                tx_id = f"EXC-{int(time.time()*1000)}"
+                note_str = f"{exc_date}: {exc_hours}hrs - {exc_reason}"
+                run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, tx_type, note) VALUES (:id, :p, :amt, 'PENDING_MGR', 'EXCEPTION', :note)", {"id": tx_id, "p": pin, "amt": amt, "note": note_str})
+                st.success("✅ Exception submitted to management.")
+                time.sleep(1.5); st.rerun()
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
