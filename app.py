@@ -204,7 +204,6 @@ def calculate_shift_differentials(start_timestamp, base_rate):
     base_pay = 0.0; diff_pay = 0.0; notes = set()
     current_dt = start_dt
     
-    # Iterate through the shift minute-by-minute
     while current_dt < end_dt:
         minute_base = base_rate / 60.0
         minute_diff = 0.0
@@ -236,7 +235,8 @@ def calculate_fatigue_score(p_pin, target_dept):
     
     current_weekday = date.today().weekday()
     if current_weekday >= 5: 
-        res_wknds = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND extract(isodow from timestamp) >= 6 AND timestamp >= NOW() - INTERVAL '30 days'", {"p": p_pin})
+        # PATCH: Explicit Timezone casting for exact day-of-week logic in Postgres
+        res_wknds = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND extract(isodow from timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST') >= 6 AND timestamp >= NOW() - INTERVAL '30 days'", {"p": p_pin})
         if res_wknds and res_wknds[0][0] > 1: score += 50.0; notes.append(f"Weekend Equality (Worked {res_wknds[0][0]} recently)")
     
     res_acc = run_query("SELECT count(*) FROM accolades WHERE pin=:p AND timestamp >= NOW() - INTERVAL '7 days'", {"p": p_pin})
@@ -334,7 +334,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.0-Pilot</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.1-Pilot</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: Secure Database Connection Offline. System Access Denied.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -425,26 +425,28 @@ if nav == "DASHBOARD":
                 st.rerun()
             else: st.error("❌ CRITICAL: Database refused clock-out.")
         
-        with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)"):
-            st.caption("Simulate native mobile app triggers.")
-            if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
-                success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
-                if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
-            
-            c_ble1, c_ble2 = st.columns(2)
-            if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
-                log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
-            if c_ble2.button("🛡️ Audit Isolation Care"):
-                if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ Audit Verified!")
-                else: st.error("❌ BLE Audit Failed.")
+        # PATCH 1: RBAC Security Lock for the Simulation Engine
+        if user['level'] in ["Admin", "Manager", "Supervisor"]:
+            with st.expander("⚙️ PILOT ADMIN: App Simulation Engine (Equipment & EMR Triggers)"):
+                st.caption("Simulate native mobile app triggers. Restricted to Command Level access.")
+                if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
+                    success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
+                    if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
+                
+                c_ble1, c_ble2 = st.columns(2)
+                if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
+                    log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
+                if c_ble2.button("🛡️ Audit Isolation Care"):
+                    if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ Audit Verified!")
+                    else: st.error("❌ BLE Audit Failed.")
 
-            st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
-            st.caption("🏥 Advanced Clinical Accolades (EMR Verified)")
-            c_acc1, c_acc2, c_acc3, c_acc4 = st.columns(4)
-            if c_acc1.button("🩸 ECMO"): award_accolade(pin, "Advanced Perfusion (ECMO)", "Clinical Operator", True); st.success("Accolade: ECMO")
-            if c_acc2.button("💉 Pressors"): award_accolade(pin, "Critical Pharmacotherapy (Pressors)", "Clinical Operator", True); st.success("Accolade: Pressors")
-            if c_acc3.button("🔄 Dialysis"): award_accolade(pin, "Renal Replacement Therapy", "Clinical Operator", True); st.success("Accolade: CRRT")
-            if c_acc4.button("🌬️ Vent Mgmt"): award_accolade(pin, "Advanced Airway Management", "Clinical Operator", True); st.success("Accolade: Vent")
+                st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+                st.caption("🏥 Advanced Clinical Accolades (EMR Verified)")
+                c_acc1, c_acc2, c_acc3, c_acc4 = st.columns(4)
+                if c_acc1.button("🩸 ECMO"): award_accolade(pin, "Advanced Perfusion (ECMO)", "Clinical Operator", True); st.success("Accolade: ECMO")
+                if c_acc2.button("💉 Pressors"): award_accolade(pin, "Critical Pharmacotherapy (Pressors)", "Clinical Operator", True); st.success("Accolade: Pressors")
+                if c_acc3.button("🔄 Dialysis"): award_accolade(pin, "Renal Replacement Therapy", "Clinical Operator", True); st.success("Accolade: CRRT")
+                if c_acc4.button("🌬️ Vent Mgmt"): award_accolade(pin, "Advanced Airway Management", "Clinical Operator", True); st.success("Accolade: Vent")
 
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
@@ -452,23 +454,28 @@ if nav == "DASHBOARD":
             st.info("Identity verification required to initiate shift.")
             camera_photo = st.camera_input("Take a photo to verify identity")
             loc = get_geolocation()
-            if camera_photo and loc:
-                user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
-                fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
-                if selected_facility != "Remote/Anywhere":
-                    if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
-                        st.success(f"✅ Geofence Confirmed.")
-                        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
-                        if st.button("PUNCH IN") and start_pin == pin:
-                            start_t = time.time()
-                            if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
-                                st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                    else: st.error("❌ Geofence Failed.")
+            
+            if camera_photo:
+                # PATCH 2: Graceful Degradation for GPS Failure
+                if loc:
+                    user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
+                    fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
+                    if selected_facility != "Remote/Anywhere":
+                        if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
+                            st.success(f"✅ Geofence Confirmed.")
+                            start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
+                            if st.button("PUNCH IN") and start_pin == pin:
+                                start_t = time.time()
+                                if update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon):
+                                    st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                        else: st.error("❌ Geofence Failed.")
+                    else:
+                        st.success("✅ Remote Check-in Authorized.")
+                        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
+                        if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
+                            start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
                 else:
-                    st.success("✅ Remote Check-in Authorized.")
-                    start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
-                    if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
-                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                    st.error("📡 GPS Signal Denied or Unavailable. Please enable Location Services in your device browser settings to verify facility presence.")
         else:
             st.caption("✨ VIP Security Override Active")
             start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
@@ -482,7 +489,7 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     if st.button("🔄 Refresh Data Link"): st.rerun()
     t_finance, t_fleet, t_audit = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING", "🛡️ PROOF OF CARE AUDIT"])
     
-    raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
+    raw_history = run_query("SELECT pin, amount, DATE(timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST') FROM history WHERE action='CLOCK OUT'")
     if not raw_history:
         dates = pd.date_range(end=datetime.today(), periods=14).tolist()
         demo_data = []
@@ -508,18 +515,14 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                 w_rate = float(USERS.get(w_pin, {}).get("rate", 0.0))
                 hrs = (time.time() - w_start) / 3600
                 
-                # 🚀 NEW: Admin calculates accurate live pay before forcing clock out
                 base_pay, diff_pay, diff_str = calculate_shift_differentials(w_start, w_rate)
                 est_gross = float(w[2]) + base_pay + diff_pay
                 
                 st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><h4 style='margin:0;'>{w_name}</h4><span style='color:#10b981; font-weight:bold;'>🟢 ON CLOCK ({hrs:.2f} hrs) | Est: ${est_gross:.2f}</span></div></div>", unsafe_allow_html=True)
                 
-                # 🚀 NEW: Admin Force Clock-Out Button
                 if st.button(f"🛑 FORCE CLOCK OUT: {w_name}", key=f"force_out_{w_pin}"):
                     if update_status(w_pin, "Inactive", 0, 0.0, w_lat, w_lon):
                         log_action(w_pin, "CLOCK OUT", base_pay+diff_pay, f"Manager Forced Clock Out" + (f" [{diff_str}]" if diff_pay > 0 else ""))
-                        
-                        # Process Payout to Bank automatically if Web3 linked
                         hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": w_pin})
                         user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
                         if user_pubkey: execute_split_stream_payout(w_pin, est_gross, user_pubkey)
@@ -533,7 +536,7 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     with t_audit:
         st.markdown("### Verified Safety & Compliance Audits")
         st.caption("A cryptographic ledger of all physically-verified clinical safety checks.")
-        audits = run_query("SELECT pin, action, note, timestamp FROM history WHERE action='AUDIT LOGGED' ORDER BY timestamp DESC LIMIT 20")
+        audits = run_query("SELECT pin, action, note, timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST' FROM history WHERE action='AUDIT LOGGED' ORDER BY timestamp DESC LIMIT 20")
         if audits:
             for aud in audits: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between;'><strong>{USERS.get(str(aud[0]), {}).get('name', 'Unknown')}</strong><span style='color:#10b981;'>VERIFIED</span></div><div style='color:#94a3b8; font-size:0.85rem;'>{aud[2]} <br> {aud[3]}</div></div>", unsafe_allow_html=True)
         else: st.info("No compliance audits logged yet.")
@@ -616,7 +619,7 @@ elif nav == "SCHEDULE":
         else: st.info("Your schedule is clear.")
 
     with tab_hist:
-        past_shifts = run_query("SELECT timestamp, amount, note FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 15", {"p": pin})
+        past_shifts = run_query("SELECT timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST', amount, note FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 15", {"p": pin})
         if past_shifts:
             for r in past_shifts: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #64748b !important;'><div style='display: flex; justify-content: space-between;'><strong style='color: #f8fafc;'>{r[2]}</strong><strong style='color: #38bdf8;'>${float(r[1]):,.2f}</strong></div><div style='color: #94a3b8; font-size: 0.85rem;'>{r[0]}</div></div>", unsafe_allow_html=True)
         else: st.info("No worked shift history found.")
@@ -724,18 +727,23 @@ elif nav == "THE BANK":
             manual_payload_input = st.text_input("Signature Payload (JSON)")
             if st.form_submit_button("Verify & Lock to Profile"):
                 try:
-                    auth_payload = json.loads(manual_payload_input)
-                    msg_text = auth_payload['message']
-                    if msg_text.startswith("Authenticate EC Protocol | Nonce: "):
-                        msg_time = int(msg_text.split("Nonce: ")[1])
-                        current_time = int(time.time() * 1000)
-                        if (current_time - msg_time) < 300000: # 5 Minute expiry
-                            if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], msg_text):
-                                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
-                                st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
-                            else: st.error("❌ Cryptographic signature failed mathematical verification.")
-                        else: st.error("❌ Signature expired. Please click the Phantom button to generate a new Nonce.")
-                    else: st.error("❌ Invalid Payload format.")
+                    # PATCH 4: Input Sanitization to prevent JSONDecodeError from mobile pasting
+                    clean_input = manual_payload_input.strip()
+                    if not clean_input:
+                        st.error("❌ Please provide a payload.")
+                    else:
+                        auth_payload = json.loads(clean_input)
+                        msg_text = auth_payload['message']
+                        if msg_text.startswith("Authenticate EC Protocol | Nonce: "):
+                            msg_time = int(msg_text.split("Nonce: ")[1])
+                            current_time = int(time.time() * 1000)
+                            if (current_time - msg_time) < 300000: # 5 Minute expiry
+                                if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], msg_text):
+                                    run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
+                                    st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
+                                else: st.error("❌ Cryptographic signature failed mathematical verification.")
+                            else: st.error("❌ Signature expired. Please click the Phantom button to generate a new Nonce.")
+                        else: st.error("❌ Invalid Payload format.")
                 except Exception as e: st.error("Invalid Payload Format. Please ensure you copied the entire JSON string.")
 
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
@@ -800,7 +808,7 @@ elif nav == "MY PROFILE":
     with t_acc:
         st.markdown("### Verified Clinical History")
         st.caption("Proof of Care (PoC) badges linked to your identity via EMR & BLE verification.")
-        my_accolades = run_query("SELECT title, badge_type, timestamp, emr_verified FROM accolades WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        my_accolades = run_query("SELECT title, badge_type, timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'EST', emr_verified FROM accolades WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
         if my_accolades:
             for acc in my_accolades:
                 title, b_type, ts, is_emr = acc[0], acc[1], acc[2], acc[3]
