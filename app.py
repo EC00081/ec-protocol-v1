@@ -81,7 +81,7 @@ def phantom_wallet_connector():
                     try {
                         const resp = await window.solana.connect();
                         const pubKey = resp.publicKey.toString();
-                        const msg = "Authenticate EC Protocol";
+                        const msg = "Authenticate EC Protocol | Nonce: " + Date.now();
                         const encodedMessage = new TextEncoder().encode(msg);
                         const signedMessage = await window.solana.signMessage(encodedMessage, "utf8");
                         const sigHex = Array.from(signedMessage.signature).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -190,8 +190,12 @@ def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     log_action(pin, "TAX WITHHELD", tax_withheld, f"Routed to Treasury")
     return net_payout, tax_withheld
 
-# --- HARDENED PAYROLL ENGINE ---
+# --- 🚀 THE ADP-STYLE CONTINUOUS DIFFERENTIAL ENGINE ---
 def calculate_shift_differentials(start_timestamp, base_rate):
+    """
+    Slices a continuous shift into literal minutes to perfectly stack Base, Evening, Night, and Weekend modifiers 
+    without requiring the worker to clock out and clock back in.
+    """
     start_dt = datetime.fromtimestamp(start_timestamp, tz=LOCAL_TZ)
     end_dt = datetime.now(LOCAL_TZ)
     total_seconds = (end_dt - start_dt).total_seconds()
@@ -200,11 +204,24 @@ def calculate_shift_differentials(start_timestamp, base_rate):
     base_pay = 0.0; diff_pay = 0.0; notes = set()
     current_dt = start_dt
     
+    # Iterate through the shift minute-by-minute
     while current_dt < end_dt:
         minute_base = base_rate / 60.0
         minute_diff = 0.0
-        if current_dt.weekday() >= 5: minute_diff += (3.00 / 60.0); notes.add("WKD(+$3)")
-        if current_dt.hour >= 19 or current_dt.hour < 7: minute_diff += (5.00 / 60.0); notes.add("NOC(+$5)")
+        
+        # 1. Weekend Logic (Saturday & Sunday Calendar Days)
+        if current_dt.weekday() >= 5: 
+            minute_diff += (3.00 / 60.0)
+            notes.add("WKD(+$3)")
+            
+        # 2. Time-of-Day Logic (Day vs Evening vs Night)
+        if 15 <= current_dt.hour < 19: 
+            minute_diff += (3.00 / 60.0) # Evening: 3pm to 7pm
+            notes.add("EVE(+$3)")
+        elif current_dt.hour >= 19 or current_dt.hour < 7: 
+            minute_diff += (5.00 / 60.0) # Night: 7pm to 7am
+            notes.add("NOC(+$5)")
+            
         base_pay += minute_base; diff_pay += minute_diff
         current_dt += timedelta(minutes=1)
         
@@ -214,7 +231,6 @@ def calculate_fatigue_score(p_pin, target_dept):
     res_hrs = run_query("SELECT amount FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '14 days'", {"p": p_pin})
     base_rate = float(USERS.get(p_pin, {}).get('rate', 0.1))
     hrs_worked = (sum([float(r[0]) for r in res_hrs]) / base_rate) if res_hrs else 0.0
-    
     score = hrs_worked 
     notes = []
     
@@ -318,7 +334,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.7.0-Pilot</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.0-Pilot</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: Secure Database Connection Offline. System Access Denied.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -330,11 +346,9 @@ if 'logged_in_user' not in st.session_state:
             for p, d in USERS.items():
                 if d.get("email") == login_email.lower():
                     stored_hash = d.get("password_hash")
-                    # OpSec Expiry Check
                     pw_expired = False
                     if d.get("last_pw_change"):
                         try:
-                            # Safely handle datetime objects vs strings
                             last_update = d["last_pw_change"]
                             if isinstance(last_update, str): last_update = datetime.fromisoformat(last_update)
                             if last_update.tzinfo is None: last_update = last_update.replace(tzinfo=pytz.UTC)
@@ -350,7 +364,7 @@ if 'logged_in_user' not in st.session_state:
                             st.rerun()
                         else: auth_pin = p; break
                         
-                    if is_default and not stored_hash: # Fallback for initial seed
+                    if is_default and not stored_hash: 
                         st.session_state.pending_opsec_reset = True
                         st.session_state.pending_opsec_pin = p
                         st.rerun()
@@ -380,7 +394,7 @@ st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; m
 
 if nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
-    st.caption("ℹ️ PILOT MODE: Payouts represent 'Shadow Ledger' metrics. No live USDC is transmitted during the 30-day trial.")
+    st.caption("ℹ️ PILOT MODE: Payouts represent 'Shadow Ledger' metrics. No live USDC is transmitted during the trial.")
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
     if user['level'] in ["Manager", "Director", "Supervisor"]:
         active_count = run_query("SELECT COUNT(*) FROM workers WHERE status='Active'")[0][0] if run_query("SELECT COUNT(*) FROM workers WHERE status='Active'") else 0
@@ -490,8 +504,29 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
         if active_workers:
             map_data = []
             for w in active_workers:
-                w_pin, w_start, w_lat, w_lon = str(w[0]), float(w[1]), w[3], w[4]; w_name = USERS.get(w_pin, {}).get("name", "Unknown"); hrs = (time.time() - w_start) / 3600
-                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><h4 style='margin:0;'>{w_name}</h4><span style='color:#10b981; font-weight:bold;'>🟢 ON CLOCK ({hrs:.2f} hrs)</span></div>", unsafe_allow_html=True)
+                w_pin, w_start, w_lat, w_lon = str(w[0]), float(w[1]), w[3], w[4]; w_name = USERS.get(w_pin, {}).get("name", "Unknown")
+                w_rate = float(USERS.get(w_pin, {}).get("rate", 0.0))
+                hrs = (time.time() - w_start) / 3600
+                
+                # 🚀 NEW: Admin calculates accurate live pay before forcing clock out
+                base_pay, diff_pay, diff_str = calculate_shift_differentials(w_start, w_rate)
+                est_gross = float(w[2]) + base_pay + diff_pay
+                
+                st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><h4 style='margin:0;'>{w_name}</h4><span style='color:#10b981; font-weight:bold;'>🟢 ON CLOCK ({hrs:.2f} hrs) | Est: ${est_gross:.2f}</span></div></div>", unsafe_allow_html=True)
+                
+                # 🚀 NEW: Admin Force Clock-Out Button
+                if st.button(f"🛑 FORCE CLOCK OUT: {w_name}", key=f"force_out_{w_pin}"):
+                    if update_status(w_pin, "Inactive", 0, 0.0, w_lat, w_lon):
+                        log_action(w_pin, "CLOCK OUT", base_pay+diff_pay, f"Manager Forced Clock Out" + (f" [{diff_str}]" if diff_pay > 0 else ""))
+                        
+                        # Process Payout to Bank automatically if Web3 linked
+                        hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": w_pin})
+                        user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
+                        if user_pubkey: execute_split_stream_payout(w_pin, est_gross, user_pubkey)
+                        
+                        st.success(f"✅ Successfully clocked out {w_name}.")
+                        time.sleep(2); st.rerun()
+
                 if w_lat and w_lon: map_data.append({"name": w_name, "lat": float(w_lat), "lon": float(w_lon)})
             if map_data: st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame(map_data), get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100)], initial_view_state=pdk.ViewState(latitude=pd.DataFrame(map_data)['lat'].mean(), longitude=pd.DataFrame(map_data)['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
         else: st.info("No active operators in the field.")
@@ -640,8 +675,12 @@ elif nav == "APPROVALS":
             for tx in pending_cfo:
                 st.markdown(f"<div class='glass-card' style='border-left: 4px solid #3b82f6 !important;'><h4>{USERS.get(str(tx[1]), {}).get('name', 'Unknown')} | ${float(tx[2]):,.2f}</h4></div>", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
-                if c1.button("💸 RELEASE FUNDS", key=f"cfo_{tx[0]}"): run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
-                if c2.button("❌ DENY", key=f"den_{tx[0]}"): run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
+                if c1.button("💸 RELEASE FUNDS", key=f"cfo_{tx[0]}"): 
+                    updated = run_transaction("UPDATE transactions SET status='APPROVED' WHERE tx_id=:id AND status='PENDING_CFO'", {"id": tx[0]})
+                    if updated: st.success("Approved!"); st.rerun()
+                    else: st.error("Transaction state changed. Please refresh."); time.sleep(2); st.rerun()
+                if c2.button("❌ DENY", key=f"den_{tx[0]}"): 
+                    run_transaction("UPDATE transactions SET status='DENIED' WHERE tx_id=:id", {"id": tx[0]}); st.rerun()
         else: st.info("No funds pending authorization.")
     else:
         tab_fin, tab_pto = st.tabs(["🕒 VERIFY HOURS", "🏝️ PTO REQUESTS"])
@@ -655,13 +694,12 @@ elif nav == "APPROVALS":
                         u_name = USERS.get(str(tx[1]), {}).get('name', 'Unknown')
                         last_shift = run_query("SELECT note, timestamp FROM history WHERE pin=:p AND action='CLOCK OUT' ORDER BY timestamp DESC LIMIT 1", {"p": tx[1]})
                         shift_context = last_shift[0][0] if last_shift else "No recent shift context."
-                        
                         checkbox_label = f"**{u_name}** — ${float(tx[2]):,.2f} | (Context: {shift_context})"
                         selections[tx[0]] = st.checkbox(checkbox_label)
                         
                     if st.form_submit_button("☑️ BATCH VERIFY SELECTED"):
                         for t_id, is_sel in selections.items():
-                            if is_sel: run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id", {"id": t_id})
+                            if is_sel: run_transaction("UPDATE transactions SET status='PENDING_CFO' WHERE tx_id=:id AND status='PENDING_MGR'", {"id": t_id})
                         st.success("✅ Pushed to Treasury."); time.sleep(1.5); st.rerun()
             else: st.info("No shift exceptions pending.")
             
@@ -687,10 +725,17 @@ elif nav == "THE BANK":
             if st.form_submit_button("Verify & Lock to Profile"):
                 try:
                     auth_payload = json.loads(manual_payload_input)
-                    if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], auth_payload['message']):
-                        run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
-                        st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
-                    else: st.error("❌ Cryptographic signature failed verification.")
+                    msg_text = auth_payload['message']
+                    if msg_text.startswith("Authenticate EC Protocol | Nonce: "):
+                        msg_time = int(msg_text.split("Nonce: ")[1])
+                        current_time = int(time.time() * 1000)
+                        if (current_time - msg_time) < 300000: # 5 Minute expiry
+                            if verify_wallet_signature(auth_payload['pubkey'], auth_payload['signature'], msg_text):
+                                run_transaction("UPDATE enterprise_users SET solana_pubkey=:pubkey WHERE pin=:p", {"pubkey": auth_payload['pubkey'], "p": pin})
+                                st.success("✅ Cryptographic Signature Verified! Wallet locked."); time.sleep(1.5); st.rerun()
+                            else: st.error("❌ Cryptographic signature failed mathematical verification.")
+                        else: st.error("❌ Signature expired. Please click the Phantom button to generate a new Nonce.")
+                    else: st.error("❌ Invalid Payload format.")
                 except Exception as e: st.error("Invalid Payload Format. Please ensure you copied the entire JSON string.")
 
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
@@ -723,8 +768,6 @@ elif nav == "MY PROFILE":
     
     with t_sec:
         st.markdown("### Account Security (Bcrypt)")
-        
-        # Display current OpSec status
         st.info(f"Enterprise mandates password rotation every {OPSEC_PW_EXPIRY_DAYS} days.")
         
         with st.form("update_password_form"):
