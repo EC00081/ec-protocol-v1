@@ -130,17 +130,19 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, last_updated timestamp DEFAULT NOW());"))
+            
+            # --- ACUITY UPGRADE ---
+            conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
+            try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
+            except: pass
+
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
-            
-            # Database update to support transaction notes
-            conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS note TEXT;"))
             conn.commit()
         return engine
     except Exception as e: 
@@ -343,7 +345,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.4-Stable</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.5-Stable</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -549,15 +551,32 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
         for s in full_scheds: st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
     else: st.info("No baseline shifts scheduled.")
 
+# --- 🚀 NEW: DEPARTMENT ACUITY ENGINE ---
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
-    c_data = run_query("SELECT total_pts, high_acuity, last_updated FROM unit_census WHERE dept=:d", {"d": user['dept']})
-    curr_pts, curr_high = (c_data[0][0], c_data[0][1]) if c_data else (0, 0)
-    req_staff = math.ceil(curr_high / 3) + math.ceil(max(0, curr_pts - curr_high) / 6)
+    
+    c_data = run_query("SELECT total_pts, high_acuity, last_updated, vented_pts, nipvv_pts FROM unit_census WHERE dept=:d", {"d": user['dept']})
+    curr_pts = c_data[0][0] if c_data else 0
+    curr_high = c_data[0][1] if c_data else 0
+    curr_vent = c_data[0][3] if c_data and len(c_data[0]) > 3 and c_data[0][3] is not None else 0
+    curr_nipvv = c_data[0][4] if c_data and len(c_data[0]) > 4 and c_data[0][4] is not None else 0
+    
+    # Intelligent Dynamic Staffing Math
+    if user['dept'] == "Respiratory":
+        req_staff = math.ceil(curr_vent / 4) + math.ceil(curr_nipvv / 6) + math.ceil(max(0, curr_pts - curr_vent - curr_nipvv) / 10)
+    elif user['dept'] == "ICU":
+        req_staff = math.ceil(curr_high / 1) + math.ceil(max(0, curr_pts - curr_high) / 2)
+    else:
+        req_staff = math.ceil(curr_high / 3) + math.ceil(max(0, curr_pts - curr_high) / 6)
+        
     actual_staff = sum(1 for r in run_query("SELECT pin FROM workers WHERE status='Active'") if USERS.get(str(r[0]), {}).get('dept') == user['dept']) if run_query("SELECT pin FROM workers WHERE status='Active'") else 0
     variance = actual_staff - req_staff
-    col1, col2, col3 = st.columns(3); col1.metric("Total Patients", curr_pts); col2.metric("Required Staff", req_staff)
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Patients", curr_pts)
+    col2.metric("Required Staff", req_staff)
+    
     if variance < 0:
         col3.metric("Current Staff", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
         if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
@@ -567,13 +586,44 @@ elif nav == "CENSUS & ACUITY":
                 run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
                 lock_escrow_bounty(new_shift_id, rate) 
             st.success("🚨 SOS Broadcasted! Smart Contract Escrow Locked!"); time.sleep(2.5); st.rerun()
-    else: col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
-    with st.expander("📝 LIVE BED BOARD (ADMIT/DISCHARGE)", expanded=True):
+    else: 
+        col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
+    
+    # Dynamic Acuity Metrics display
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+    if user['dept'] == "Respiratory":
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Life Support (Vents)", curr_vent)
+        sc2.metric("Non-Invasive (BiPAP/CPAP)", curr_nipvv)
+        sc3.metric("Floor Therapy (Standard)", max(0, curr_pts - curr_vent - curr_nipvv))
+    elif user['dept'] == "ICU":
+        sc1, sc2 = st.columns(2)
+        sc1.metric("1:1 Critical Acuity", curr_high)
+        sc2.metric("Standard ICU (1:2)", max(0, curr_pts - curr_high))
+    
+    with st.expander("📝 LIVE BED BOARD (ADMIT/DISCHARGE & ACUITY)", expanded=True):
         st.caption("Manage unit flow. Updates calculate required staffing instantly.")
-        c_b1, c_b2 = st.columns(2)
-        if c_b1.button("➕ ADMIT: Standard Acuity"): run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, 1, 0) ON CONFLICT (dept) DO UPDATE SET total_pts=unit_census.total_pts+1", {"d": user['dept']}); st.rerun()
-        if c_b2.button("➕ ADMIT: High Acuity (1:3 Ratio)"): run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity) VALUES (:d, 1, 1) ON CONFLICT (dept) DO UPDATE SET total_pts=unit_census.total_pts+1, high_acuity=unit_census.high_acuity+1", {"d": user['dept']}); st.rerun()
-        if st.button("➖ DISCHARGE PATIENT"): run_transaction("UPDATE unit_census SET total_pts=total_pts-1 WHERE dept=:d AND total_pts > 0", {"d": user['dept']}); st.rerun()
+        with st.form("update_census"):
+            new_t = st.number_input("Total Unit Census", min_value=0, value=curr_pts)
+            
+            if user['dept'] == "Respiratory":
+                st.markdown("**Respiratory Specifics**")
+                new_vent = st.number_input("Vented Patients", min_value=0, value=curr_vent)
+                new_nipvv = st.number_input("Non-Invasive (BiPAP/CPAP)", min_value=0, value=curr_nipvv)
+                new_h = new_vent + new_nipvv 
+            elif user['dept'] == "ICU":
+                st.markdown("**ICU Specifics**")
+                new_h = st.number_input("1:1 High Acuity Patients", min_value=0, value=curr_high)
+                new_vent = curr_vent
+                new_nipvv = curr_nipvv
+            else:
+                new_h = st.number_input("High Acuity Patients", min_value=0, value=curr_high)
+                new_vent = curr_vent
+                new_nipvv = curr_nipvv
+                
+            if st.form_submit_button("Lock In Census"): 
+                run_transaction("INSERT INTO unit_census (dept, total_pts, high_acuity, vented_pts, nipvv_pts) VALUES (:d, :t, :h, :v, :n) ON CONFLICT (dept) DO UPDATE SET total_pts=:t, high_acuity=:h, vented_pts=:v, nipvv_pts=:n, last_updated=NOW()", {"d": user['dept'], "t": new_t, "h": new_h, "v": new_vent, "n": new_nipvv})
+                st.success("Census and Acuity logged successfully."); time.sleep(1); st.rerun()
 
 elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
@@ -596,7 +646,6 @@ elif nav == "MARKETPLACE":
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
-    
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_mine, tab_hist, tab_master, tab_ai, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER", "🏝️ REQUEST PTO"])
     else: tab_mine, tab_hist, tab_master, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🏝️ REQUEST PTO"])
         
@@ -629,7 +678,6 @@ elif nav == "SCHEDULE":
                 for s in groups[date_key]:
                     owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
                     st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
-                    # 🚀 NEW: Manager Schedule Edit Buttons
                     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
                         m1, m2, m3 = st.columns([2, 2, 8])
                         if m1.button("❌ Remove", key=f"del_{s[0]}", use_container_width=True):
@@ -668,8 +716,7 @@ elif nav == "SCHEDULE":
                         if st.form_submit_button("🚨 FORCE DISPATCH"):
                             target_p = override_pin.split(" - ")[0]
                             run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": target_p, "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success("✅ Override Authorized."); del st.session_state.ai_date; time.sleep(2); st.rerun()
-    
-    # 🚀 NEW: Restored PTO Request Tab
+
     with tab_pto:
         st.markdown("### Request Paid Time Off")
         with st.form("pto_form"):
@@ -769,7 +816,6 @@ elif nav == "THE BANK":
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
-        # 🚀 NEW: Web3 Bypass (Fiat Fallback)
         if st.button("⚡ EXECUTE PAYOUT (Web3 / Fiat Fallback)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
             st.session_state['payout_processing'] = True
             net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
@@ -783,7 +829,6 @@ elif nav == "THE BANK":
             st.rerun()
     elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
 
-    # 🚀 NEW: Manual Exception Submissions
     st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
     with st.expander("🛠️ Submit Exception / Overtime Hours"):
         st.caption("Submit extra hours worked outside your normal schedule for manager approval.")
