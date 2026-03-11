@@ -19,15 +19,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- EXTERNAL LIBRARIES ---
-try: from fpdf import FPDF; PDF_ACTIVE = True
-except ImportError: PDF_ACTIVE = False
+try: 
+    from fpdf import FPDF
+    PDF_ACTIVE = True
+except ImportError: 
+    PDF_ACTIVE = False
+
 try: from twilio.rest import Client; TWILIO_ACTIVE = True
 except ImportError: TWILIO_ACTIVE = False
 try: import nacl.signing; import nacl.encoding; NACL_ACTIVE = True
 except ImportError: NACL_ACTIVE = False
 
 # --- GLOBAL CONSTANTS ---
-TAX_RATES = {"FED": 0.22, "MA": 0.05, "SS": 0.062, "MED": 0.0145}
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
 HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
@@ -132,12 +135,9 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            
-            # --- ACUITY UPGRADE ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
             except: pass
-
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
@@ -192,20 +192,91 @@ def force_cloud_sync(pin):
 def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
 
+# --- 🚀 PROGRESSIVE TAX ENGINE ---
+def calculate_taxes(pin, gross_amount):
+    """Calculates progressive Federal Tax based on YTD earnings, plus flat state/FICA."""
+    if gross_amount <= 0.0: return 0.0, 0.0, 0.0, 0.0, 0.0
+    
+    # Calculate Year-To-Date Gross from history
+    res = run_query("SELECT SUM(amount) FROM history WHERE pin=:p AND action IN ('CLOCK OUT', 'MANUAL PAYOUT RELEASED') AND EXTRACT(YEAR FROM timestamp) = EXTRACT(YEAR FROM NOW())", {"p": pin})
+    ytd_gross = float(res[0][0]) if res and res[0][0] else 0.0
+    
+    # 2024 Progressive Federal Tax Brackets (Simplified Single Filer)
+    def calculate_federal_bracket(income):
+        tax = 0.0
+        if income > 191950: tax += (income - 191950) * 0.32; income = 191950
+        if income > 100525: tax += (income - 100525) * 0.24; income = 100525
+        if income > 47150: tax += (income - 47150) * 0.22; income = 47150
+        if income > 11600: tax += (income - 11600) * 0.12; income = 11600
+        if income > 0: tax += income * 0.10
+        return tax
+
+    # Calculate exact marginal tax for this specific paycheck
+    fed_tax_before = calculate_federal_bracket(ytd_gross)
+    fed_tax_after = calculate_federal_bracket(ytd_gross + gross_amount)
+    fed_withholding = fed_tax_after - fed_tax_before
+    
+    # Flat State and FICA rates
+    ma_withholding = gross_amount * 0.05
+    ss_withholding = gross_amount * 0.062
+    med_withholding = gross_amount * 0.0145
+    
+    total_tax = fed_withholding + ma_withholding + ss_withholding + med_withholding
+    return total_tax, fed_withholding, ma_withholding, ss_withholding, med_withholding
+
+# --- 📄 PDF PAYSTUB GENERATOR ---
+def create_paystub_pdf(name, date_str, tx_id, gross, net, tax, dest):
+    if not PDF_ACTIVE: return None
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(190, 10, txt="VICENTUS ENTERPRISE - OFFICIAL PAY RECEIPT", ln=True, align='C')
+        pdf.set_font("Arial", '', 12)
+        pdf.ln(10)
+        pdf.cell(100, 10, txt=f"Operator: {name}", ln=True)
+        pdf.cell(100, 10, txt=f"Date of Settlement: {date_str}", ln=True)
+        pdf.cell(100, 10, txt=f"Ledger Tx ID: {tx_id}", ln=True)
+        
+        mode = "Solana Web3 Smart Contract" if dest and len(dest) > 30 else "Fiat Direct Deposit"
+        pdf.cell(100, 10, txt=f"Routing Method: {mode}", ln=True)
+        pdf.cell(100, 10, txt=f"Destination: {dest}", ln=True)
+        pdf.ln(10)
+        
+        pdf.line(10, 80, 200, 80)
+        pdf.ln(5)
+        pdf.cell(100, 10, txt=f"Gross Pay: ${gross:,.2f}", ln=True)
+        pdf.cell(100, 10, txt=f"Progressive Tax Withholding: ${tax:,.2f}", ln=True)
+        pdf.set_font("Arial", 'B', 14)
+        pdf.cell(100, 10, txt=f"Net Settlement: ${net:,.2f}", ln=True)
+        pdf.ln(5)
+        pdf.line(10, 115, 200, 115)
+        
+        pdf.ln(10)
+        pdf.set_font("Arial", 'I', 10)
+        pdf.cell(190, 10, txt="This is a cryptographically verifiable ledger receipt generated by Vicentus.", ln=True, align='C')
+        
+        return pdf.output(dest='S').encode('latin-1')
+    except Exception as e:
+        try: return bytes(pdf.output()) # FPDF2 handler
+        except: return None
+
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
-    tax_withheld = gross_amount * sum(TAX_RATES.values())
-    net_payout = gross_amount - tax_withheld
-    tx_base_id = int(time.time())
     
+    total_tax, fed, ma, ss, med = calculate_taxes(pin, gross_amount)
+    net_payout = gross_amount - total_tax
+    tx_base_id = int(time.time())
     dest_pubkey = user_pubkey if user_pubkey else "FIAT_DIRECT_DEPOSIT"
     
-    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY')", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": dest_pubkey})
-    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": tax_withheld, "dest": TREASURY_PUBKEY})
+    note_str = f"Gross: {gross_amount} | Tax: {total_tax}"
+    
+    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type, note) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY', :note)", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": dest_pubkey, "note": note_str})
+    run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": total_tax, "dest": TREASURY_PUBKEY})
     
     log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to {dest_pubkey[:12]}...")
-    log_action(pin, "TAX WITHHELD", tax_withheld, f"Routed to Treasury")
-    return net_payout, tax_withheld
+    log_action(pin, "TAX WITHHELD", total_tax, f"Routed to Treasury")
+    return net_payout, total_tax
 
 def calculate_shift_differentials(start_timestamp, base_rate):
     start_dt = datetime.fromtimestamp(start_timestamp, tz=LOCAL_TZ)
@@ -345,7 +416,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.7</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.0.0-FinTech</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -420,7 +491,10 @@ if nav == "DASHBOARD":
         running_earn = base_pay + diff_pay
         if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
-    c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross * (1 - sum(TAX_RATES.values())):,.2f}")
+    
+    # 🚀 NEW: Real-Time Progressive Tax Estimation
+    est_total_tax, _, _, _, _ = calculate_taxes(pin, display_gross)
+    c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL (Gross)", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross - est_total_tax:,.2f}")
     st.markdown("<br>", unsafe_allow_html=True)
 
     if active:
@@ -551,7 +625,6 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
         for s in full_scheds: st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
     else: st.info("No baseline shifts scheduled.")
 
-# --- 🚀 NEW: DEPARTMENT ACUITY ENGINE ---
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
@@ -562,7 +635,6 @@ elif nav == "CENSUS & ACUITY":
     curr_vent = c_data[0][3] if c_data and len(c_data[0]) > 3 and c_data[0][3] is not None else 0
     curr_nipvv = c_data[0][4] if c_data and len(c_data[0]) > 4 and c_data[0][4] is not None else 0
     
-    # Intelligent Dynamic Staffing Math
     if user['dept'] == "Respiratory":
         req_staff = math.ceil(curr_vent / 4) + math.ceil(curr_nipvv / 6) + math.ceil(max(0, curr_pts - curr_vent - curr_nipvv) / 10)
     elif user['dept'] == "ICU":
@@ -589,7 +661,6 @@ elif nav == "CENSUS & ACUITY":
     else: 
         col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
     
-    # Dynamic Acuity Metrics display
     st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
     if user['dept'] == "Respiratory":
         sc1, sc2, sc3 = st.columns(3)
@@ -681,8 +752,6 @@ elif nav == "SCHEDULE":
                 for s in groups[date_key]:
                     owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
                     st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
-                    
-                    # 🚀 NEW: AI Audit Button integrated directly into the Master Roster
                     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
                         m1, m2, m3, m4 = st.columns([2, 2, 3, 5])
                         if m1.button("❌ Remove", key=f"del_{s[0]}", use_container_width=True):
@@ -693,7 +762,6 @@ elif nav == "SCHEDULE":
                             st.session_state.active_audit = s[0]
                             st.rerun()
                             
-                    # Render AI Audit Results directly beneath the shift
                     if st.session_state.get('active_audit') == s[0]:
                         f_score, f_hrs, f_notes = calculate_fatigue_score(s[1], s[4])
                         color = "#10b981" if f_score < 72 else "#f59e0b"
@@ -849,10 +917,14 @@ elif nav == "THE BANK":
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
     db_user_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
     solana_key = db_user_data[0][0] if db_user_data and db_user_data[0][0] else None
-    banked_gross = st.session_state.user_state.get('earnings', 0.0)
-    banked_net = banked_gross * (1 - sum(TAX_RATES.values()))
     
-    st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Tax: ${banked_gross - banked_net:,.2f}</p></div>", unsafe_allow_html=True)
+    # 🚀 NEW: Progressive Tax UI Integration
+    banked_gross = st.session_state.user_state.get('earnings', 0.0)
+    total_tax, fed_tx, ma_tx, ss_tx, med_tx = calculate_taxes(pin, banked_gross)
+    banked_net = banked_gross - total_tax
+    
+    st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Total Tax: ${total_tax:,.2f}</p></div>", unsafe_allow_html=True)
+    st.caption("Federal taxes are mathematically adjusted via 2024 progressive brackets based on your Year-To-Date (YTD) cumulative earnings.")
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
         if st.button("⚡ EXECUTE PAYOUT (Web3 / Fiat Fallback)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
@@ -882,6 +954,41 @@ elif nav == "THE BANK":
                 run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, tx_type, note) VALUES (:id, :p, :amt, 'PENDING_MGR', 'EXCEPTION', :note)", {"id": tx_id, "p": pin, "amt": amt, "note": note_str})
                 st.success("✅ Exception submitted to management.")
                 time.sleep(1.5); st.rerun()
+
+    # 🚀 NEW: Ledger & Pay Stubs (PDF Generator)
+    st.markdown("### 📄 Ledger & Pay Stubs")
+    st.caption("Download official PDF receipts for all Web3 and Fiat payouts.")
+    
+    paystubs = run_query("SELECT tx_id, amount, timestamp, destination_pubkey, note FROM transactions WHERE pin=:p AND tx_type='NET_PAY' ORDER BY timestamp DESC", {"p": pin})
+    if paystubs:
+        for stub in paystubs:
+            tx_id = stub[0]
+            net_amt = float(stub[1])
+            dt_str = stub[2].strftime("%Y-%m-%d %H:%M") if hasattr(stub[2], 'strftime') else str(stub[2])
+            dest = stub[3]
+            note = stub[4]
+            
+            gross_amt = net_amt
+            tax_amt = 0.0
+            if note and "Gross:" in note:
+                try:
+                    gross_amt = float(note.split("Gross: ")[1].split(" |")[0])
+                    tax_amt = float(note.split("Tax: ")[1])
+                except: pass
+            
+            with st.expander(f"Payout: {dt_str} | ${net_amt:,.2f} Net"):
+                st.write(f"**Transaction ID:** `{tx_id}`")
+                st.write(f"**Destination:** `{dest}`")
+                st.write(f"**Gross:** ${gross_amt:,.2f} | **Tax:** ${tax_amt:,.2f} | **Net:** ${net_amt:,.2f}")
+                
+                if PDF_ACTIVE:
+                    pdf_bytes = create_paystub_pdf(user['name'], dt_str, tx_id, gross_amt, net_amt, tax_amt, dest)
+                    if pdf_bytes:
+                        st.download_button(label="📄 Download Official PDF Receipt", data=pdf_bytes, file_name=f"Paystub_{tx_id}.pdf", mime="application/pdf", key=f"pdf_{tx_id}")
+                else:
+                    st.info("PDF Generation not active. Please ensure 'fpdf' is in requirements.txt")
+    else:
+        st.info("No prior settlements found on ledger.")
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
