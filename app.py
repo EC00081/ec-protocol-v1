@@ -345,7 +345,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.5-Stable</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.6-Stable</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -551,7 +551,6 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
         for s in full_scheds: st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
     else: st.info("No baseline shifts scheduled.")
 
-# --- 🚀 NEW: DEPARTMENT ACUITY ENGINE ---
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
@@ -646,8 +645,12 @@ elif nav == "MARKETPLACE":
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
-    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_mine, tab_hist, tab_master, tab_ai, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🤖 AI SCHEDULER", "🏝️ REQUEST PTO"])
-    else: tab_mine, tab_hist, tab_master, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🏝️ REQUEST PTO"])
+    
+    # 🚀 NEW: Updated Tab Hierarchy for Managers
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: 
+        tab_mine, tab_hist, tab_master, tab_manage, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "📝 ASSIGN SHIFTS", "🏝️ REQUEST PTO"])
+    else: 
+        tab_mine, tab_hist, tab_master, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "🏝️ REQUEST PTO"])
         
     with tab_mine:
         my_scheds = run_query("SELECT shift_id, shift_date, shift_time, COALESCE(status, 'SCHEDULED') FROM schedules WHERE pin=:p AND shift_date >= :today ORDER BY shift_date ASC", {"p": pin, "today": str(date.today())})
@@ -687,35 +690,60 @@ elif nav == "SCHEDULE":
         else: st.info("Master calendar is empty for upcoming dates.")
 
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
-        with tab_ai:
-            st.markdown("### 🤖 Equitable Fatigue Engine")
-            st.caption("AI prioritizes Equality (Weekend Balance) and Fatigue Management over Seniority.")
-            with st.form("ai_scheduler"):
-                c1, c2 = st.columns(2); s_date = c1.date_input("Target Shift Date"); s_time = c2.text_input("Shift Time", value="0700-1900"); req_dept = st.selectbox("Department", ["Respiratory", "ICU", "Emergency"])
-                if st.form_submit_button("Run Algorithmic Analysis"): st.session_state.ai_date = s_date; st.session_state.ai_time = s_time; st.session_state.ai_dept = req_dept; st.rerun()
+        # 🚀 NEW: Comprehensive Sceduling Desk (Manual Input + AI)
+        with tab_manage:
+            st.markdown("### 🛠️ Shift Assignment Desk")
+            dispatch_mode = st.radio("Select Dispatch Mode", ["Manual Input & AI Analyzer", "AI Auto-Dispatch (Find Best Provider)"], horizontal=True)
+            st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
             
-            if 'ai_date' in st.session_state:
-                st.markdown(f"#### Optimal Providers for {st.session_state.ai_date} ({st.session_state.ai_dept})")
-                all_staff = {p: d for p, d in USERS.items() if d['level'] in ['Worker', 'Supervisor']}
-                stats = []
-                for p, d in all_staff.items():
-                    f_score, f_hrs, f_notes = calculate_fatigue_score(p, st.session_state.ai_dept)
-                    stats.append({"pin": p, "name": d['name'], "score": f_score, "hrs": f_hrs, "notes": f_notes})
+            if dispatch_mode == "Manual Input & AI Analyzer":
+                with st.form("manual_assign_form"):
+                    all_staff = {p: d for p, d in USERS.items() if d['level'] in ['Worker', 'Supervisor']}
+                    staff_options = [f"{d['name']} (PIN: {p})" for p, d in all_staff.items()]
+                    
+                    sel_staff = st.selectbox("Select Provider", staff_options)
+                    c1, c2, c3 = st.columns(3)
+                    m_date = c1.date_input("Shift Date")
+                    m_time = c2.text_input("Time", value="0700-1900")
+                    m_dept = c3.selectbox("Department", ["Respiratory", "ICU", "Emergency", "Floor"])
+                    
+                    st.caption("Optional: Analyze this provider's fatigue and equity score before finalizing the schedule.")
+                    col_a, col_b = st.columns(2)
+                    analyze_btn = col_a.form_submit_button("🧠 Analyze Provider Efficiency")
+                    assign_btn = col_b.form_submit_button("⚡ Force Assign Shift")
+                    
+                if analyze_btn:
+                    target_pin = sel_staff.split("PIN: ")[1].replace(")", "")
+                    f_score, f_hrs, f_notes = calculate_fatigue_score(target_pin, m_dept)
+                    color = "#10b981" if f_score < 72 else "#f59e0b"
+                    if f_score >= 100: color = "#ef4444"
+                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><h4>AI Efficiency Report: {sel_staff.split(' ')[0]}</h4><p><b>Engine Fatigue Score:</b> {f_score:.1f}<br><b>Trailing 14-Day Hours:</b> {f_hrs:.1f}<br><b>Risk Factors / Equity Notes:</b> {f_notes if f_notes else 'None (Optimal Candidate)'}</p></div>", unsafe_allow_html=True)
+                    
+                if assign_btn:
+                    target_pin = sel_staff.split("PIN: ")[1].replace(")", "")
+                    run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time()*1000)}", "p": target_pin, "d": str(m_date), "t": m_time, "dept": m_dept})
+                    st.success(f"✅ Shift securely added to {sel_staff.split(' ')[0]}'s master schedule."); time.sleep(1.5); st.rerun()
+
+            else:
+                st.caption("AI prioritizes Equality (Weekend Balance) and Fatigue Management over Seniority to find the optimal provider for an empty slot.")
+                with st.form("ai_scheduler"):
+                    c1, c2 = st.columns(2); s_date = c1.date_input("Target Shift Date"); s_time = c2.text_input("Shift Time", value="0700-1900"); req_dept = st.selectbox("Department", ["Respiratory", "ICU", "Emergency"])
+                    if st.form_submit_button("Run Algorithmic Analysis"): st.session_state.ai_date = s_date; st.session_state.ai_time = s_time; st.session_state.ai_dept = req_dept; st.rerun()
                 
-                stats = sorted(stats, key=lambda x: x['score'])
-                for idx, s in enumerate(stats[:3]):
-                    color = "#10b981" if s['score'] < 72 else "#f59e0b"
-                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div><strong style='font-size:1.1rem; color:#f8fafc;'>Choice #{idx+1}: {s['name']}</strong><br><span style='color:#94a3b8; font-size:0.9rem;'>Actual Hours (14d): {s['hrs']:.1f} | Engine Score: {s['score']:.1f}</span><br><span style='color:#38bdf8; font-size:0.8rem;'>{s['notes']}</span></div></div></div>", unsafe_allow_html=True)
-                    if st.button(f"⚡ DISPATCH TO {s['name'].upper()}", key=f"ai_{s['pin']}"):
-                        run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": s['pin'], "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success("✅ Dispatched!"); del st.session_state.ai_date; time.sleep(2); st.rerun()
-                
-                with st.expander("🛠️ Manual Override / Provider Opt-In"):
-                    st.caption("Bypass the algorithm if a provider manually requested this shift.")
-                    with st.form("manual_override"):
-                        override_pin = st.selectbox("Select Provider", [f"{s['pin']} - {s['name']} (Score: {s['score']:.1f})" for s in stats])
-                        if st.form_submit_button("🚨 FORCE DISPATCH"):
-                            target_p = override_pin.split(" - ")[0]
-                            run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": target_p, "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success("✅ Override Authorized."); del st.session_state.ai_date; time.sleep(2); st.rerun()
+                if 'ai_date' in st.session_state:
+                    st.markdown(f"#### Optimal Providers for {st.session_state.ai_date} ({st.session_state.ai_dept})")
+                    all_staff = {p: d for p, d in USERS.items() if d['level'] in ['Worker', 'Supervisor']}
+                    stats = []
+                    for p, d in all_staff.items():
+                        f_score, f_hrs, f_notes = calculate_fatigue_score(p, st.session_state.ai_dept)
+                        stats.append({"pin": p, "name": d['name'], "score": f_score, "hrs": f_hrs, "notes": f_notes})
+                    
+                    stats = sorted(stats, key=lambda x: x['score'])
+                    for idx, s in enumerate(stats[:3]):
+                        color = "#10b981" if s['score'] < 72 else "#f59e0b"
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div><strong style='font-size:1.1rem; color:#f8fafc;'>Choice #{idx+1}: {s['name']}</strong><br><span style='color:#94a3b8; font-size:0.9rem;'>Actual Hours (14d): {s['hrs']:.1f} | Engine Score: {s['score']:.1f}</span><br><span style='color:#38bdf8; font-size:0.8rem;'>{s['notes']}</span></div></div></div>", unsafe_allow_html=True)
+                        if st.button(f"⚡ DISPATCH TO {s['name'].upper()}", key=f"ai_{s['pin']}"):
+                            run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{int(time.time())}", "p": s['pin'], "d": str(st.session_state.ai_date), "t": st.session_state.ai_time, "dept": st.session_state.ai_dept}); st.success("✅ Dispatched!"); del st.session_state.ai_date; time.sleep(2); st.rerun()
 
     with tab_pto:
         st.markdown("### Request Paid Time Off")
