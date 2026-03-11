@@ -135,12 +135,10 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
-            
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
             except: pass
             
-            # --- COMMS UPGRADE ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, sender_pin text, target_dept text, message text, is_sos boolean DEFAULT FALSE, timestamp timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_sos boolean DEFAULT FALSE;"))
             except: pass
@@ -415,7 +413,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.3.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.4.0</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -581,6 +579,30 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
         with col_chart1: st.plotly_chart(px.pie(df.groupby('Dept')['Amount'].sum().reset_index(), values='Amount', names='Dept', hole=0.6, template="plotly_dark").update_layout(margin=dict(t=20, b=20, l=20, r=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"), use_container_width=True)
         with col_chart2: st.plotly_chart(go.Figure(go.Indicator(mode="gauge+number", value=agency_avoidance, title={'text': "Capital Saved ($)", 'font': {'size': 16, 'color': '#94a3b8'}}, gauge={'axis': {'range': [None, agency_cost]}, 'bar': {'color': "#10b981"}, 'bgcolor': "rgba(255,255,255,0.05)", 'steps': [{'range': [0, total_spend], 'color': "rgba(239,68,68,0.3)"}, {'range': [total_spend, agency_cost], 'color': "rgba(16,185,129,0.1)"}]})).update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, margin=dict(t=40, b=20, l=20, r=20)), use_container_width=True)
         st.plotly_chart(px.area(df.groupby('Date')['Amount'].sum().reset_index(), x="Date", y="Amount", template="plotly_dark").update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=20, b=0)), use_container_width=True)
+        
+        # 🚀 NEW: CFO Payroll CSV Export
+        st.markdown("### 📥 Legacy Payroll Bridge")
+        st.caption("Export approved settlements to CSV for seamless import into Workday, Kronos, or ADP.")
+        export_data = run_query("SELECT pin, amount, timestamp, tx_type, destination_pubkey, tx_id FROM transactions WHERE status='APPROVED' ORDER BY timestamp DESC")
+        if export_data:
+            csv_list = []
+            for ed in export_data:
+                emp_name = USERS.get(str(ed[0]), {}).get('name', 'Unknown')
+                emp_dept = USERS.get(str(ed[0]), {}).get('dept', 'Unknown')
+                csv_list.append({
+                    "Transaction_ID": ed[5],
+                    "Date": ed[2].strftime('%Y-%m-%d %H:%M') if hasattr(ed[2], 'strftime') else str(ed[2]),
+                    "Employee_PIN": ed[0],
+                    "Employee_Name": emp_name,
+                    "Department": emp_dept,
+                    "Ledger_Type": ed[3],
+                    "Amount_USD": float(ed[1]),
+                    "Routing_Destination": ed[4]
+                })
+            df_export = pd.DataFrame(csv_list)
+            csv_file = df_export.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📊 Download Master Payroll CSV", data=csv_file, file_name=f"Vicentus_Payroll_Export_{date.today()}.csv", mime="text/csv", use_container_width=True)
+        else: st.info("No approved settlements available for export.")
 
     with t_fleet:
         active_workers = run_query("SELECT pin, start_time, earnings, lat, lon FROM workers WHERE status='Active'")
@@ -722,7 +744,6 @@ elif nav == "MARKETPLACE":
                     st.error("❌ Shift Already Claimed! Another operator secured this bounty."); time.sleep(2); st.rerun()
     else: st.markdown("<div class='empty-state'><h3>No Surge Bounties Active</h3></div>", unsafe_allow_html=True)
 
-# 🚀 NEW: DIRECT MESSAGING COMMS UPGRADE
 elif nav == "COMMS":
     st.markdown("## 📡 Secure Comms")
     if st.button("🔄 Refresh Feed"): st.rerun()
