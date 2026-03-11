@@ -135,9 +135,16 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
+            
+            # --- ACUITY & COMMS UPGRADE ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
             except: pass
+            
+            conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, sender_pin text, target_dept text, message text, is_sos boolean DEFAULT FALSE, timestamp timestamp DEFAULT NOW());"))
+            try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_sos boolean DEFAULT FALSE;"))
+            except: pass
+
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
@@ -406,7 +413,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.1.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.2.0</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -456,9 +463,10 @@ with c2:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
-if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS"]
-elif user['level'] in ["Manager", "Director", "Supervisor"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "MY PROFILE"]
-else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "MY PROFILE"]
+# 🚀 NEW: Routing Update to include COMMS
+if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS", "COMMS"]
+elif user['level'] in ["Manager", "Director", "Supervisor"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "COMMS", "MY PROFILE"]
+else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "COMMS", "MY PROFILE"]
 
 st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
@@ -642,6 +650,17 @@ elif nav == "CENSUS & ACUITY":
         col3.metric("Current Staff", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
         if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
             rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
+            
+            # 🚀 NEW: Census SOS Button writes to the COMMS Engine AND sends SMS
+            sos_text = f"CRITICAL CENSUS SURGE: {abs(variance)} operators needed in {user['dept']}. Claim in Marketplace."
+            run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": user['dept'], "m": sos_text})
+            
+            for p, d in USERS.items():
+                if d.get('dept') == user['dept'] and d.get('phone'):
+                    w_status = run_query("SELECT status FROM workers WHERE pin=:p", {"p": p})
+                    if not w_status or w_status[0][0] != 'Active':
+                        send_sms(d['phone'], f"VICENTUS ALERT: {sos_text}")
+            
             for i in range(abs(variance)):
                 new_shift_id = f"SOS-{int(time.time()*1000)}-{i}"
                 run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
@@ -703,6 +722,69 @@ elif nav == "MARKETPLACE":
                     st.error("❌ Shift Already Claimed! Another operator secured this bounty."); time.sleep(2); st.rerun()
     else: st.markdown("<div class='empty-state'><h3>No Surge Bounties Active</h3></div>", unsafe_allow_html=True)
 
+# 🚀 NEW: COMMS MODULE
+elif nav == "COMMS":
+    st.markdown("## 📡 Secure Comms")
+    if st.button("🔄 Refresh Feed"): st.rerun()
+    
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_intra, tab_inter, tab_sos = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide", "🚨 SOS Dispatch"])
+    else: tab_intra, tab_inter = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide"])
+    
+    with tab_intra:
+        with st.form("intra_chat"):
+            msg = st.text_input("Send to Department")
+            if st.form_submit_button("Send"):
+                run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message) VALUES (:id, :p, :d, :m)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": user['dept'], "m": msg})
+                st.rerun()
+        
+        msgs = run_query("SELECT sender_pin, message, timestamp, is_sos FROM messages WHERE target_dept=:d ORDER BY timestamp DESC LIMIT 50", {"d": user['dept']})
+        if msgs:
+            for m in msgs:
+                sender_name = USERS.get(str(m[0]), {}).get('name', 'Unknown')
+                dt_str = m[2].strftime('%H:%M - %b %d') if hasattr(m[2], 'strftime') else str(m[2])
+                color = "#ef4444" if m[3] else "#3b82f6"
+                bg_color = "rgba(239, 68, 68, 0.1)" if m[3] else "rgba(30, 41, 59, 0.6)"
+                st.markdown(f"<div style='background: {bg_color}; border-left: 4px solid {color}; padding: 15px; border-radius: 8px; margin-bottom: 10px;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.8rem;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div>", unsafe_allow_html=True)
+        else: st.info("No departmental comms found.")
+
+    with tab_inter:
+        with st.form("inter_chat"):
+            msg = st.text_input("Send to All Departments")
+            if st.form_submit_button("Send"):
+                run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message) VALUES (:id, :p, 'All', :m)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "m": msg})
+                st.rerun()
+        
+        msgs = run_query("SELECT sender_pin, message, timestamp, is_sos FROM messages WHERE target_dept='All' ORDER BY timestamp DESC LIMIT 50")
+        if msgs:
+            for m in msgs:
+                sender_name = USERS.get(str(m[0]), {}).get('name', 'Unknown')
+                dt_str = m[2].strftime('%H:%M - %b %d') if hasattr(m[2], 'strftime') else str(m[2])
+                color = "#ef4444" if m[3] else "#10b981"
+                bg_color = "rgba(239, 68, 68, 0.1)" if m[3] else "rgba(30, 41, 59, 0.6)"
+                st.markdown(f"<div style='background: {bg_color}; border-left: 4px solid {color}; padding: 15px; border-radius: 8px; margin-bottom: 10px;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.8rem;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div>", unsafe_allow_html=True)
+        else: st.info("No global comms found.")
+
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
+        with tab_sos:
+            st.markdown("### Broadcast Emergency Alerts")
+            st.caption("Push high-priority alerts to the in-app ledger and blast SMS messages to all off-shift personnel.")
+            with st.form("sos_form"):
+                sos_target = st.selectbox("Target Department", ["All", "Respiratory", "ICU", "Emergency"])
+                sos_msg = st.text_area("SOS Message")
+                if st.form_submit_button("🚨 TRIGGER SOS DISPATCH"):
+                    run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": sos_target, "m": sos_msg})
+                    
+                    sms_count = 0
+                    for p, u_data in USERS.items():
+                        if sos_target in ["All", u_data['dept']] and u_data.get('phone'):
+                            w_status = run_query("SELECT status FROM workers WHERE pin=:p", {"p": p})
+                            if not w_status or w_status[0][0] != 'Active':
+                                send_sms(u_data['phone'], f"VICENTUS SOS: {sos_msg}")
+                                sms_count += 1
+                                
+                    st.success(f"✅ SOS Dispatched! Internal channels updated and SMS routed to {sms_count} off-shift operators.")
+                    time.sleep(2.5); st.rerun()
+
 elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
@@ -732,7 +814,6 @@ elif nav == "SCHEDULE":
         else: st.info("No worked shift history found.")
 
     with tab_master:
-        # 🚀 NEW: Weekly AI Auditor
         if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
             st.markdown("### 🏥 Master Roster")
             with st.expander("🧠 Run Weekly AI Roster Audit", expanded=False):
