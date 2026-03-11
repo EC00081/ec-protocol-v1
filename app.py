@@ -345,7 +345,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.6-Stable</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v1.9.7</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -551,6 +551,7 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
         for s in full_scheds: st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[2]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{USERS.get(str(s[1]), {}).get('name', f'User {s[1]}')}</span> | {s[4]}</div></div>", unsafe_allow_html=True)
     else: st.info("No baseline shifts scheduled.")
 
+# --- 🚀 NEW: DEPARTMENT ACUITY ENGINE ---
 elif nav == "CENSUS & ACUITY":
     st.markdown(f"## 📊 {user['dept']} Census & Staffing")
     if st.button("🔄 Refresh Census Board"): st.rerun()
@@ -646,7 +647,6 @@ elif nav == "SCHEDULE":
     st.markdown("## 📅 Intelligent Scheduling")
     if st.button("🔄 Refresh Schedule"): st.rerun()
     
-    # 🚀 NEW: Updated Tab Hierarchy for Managers
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: 
         tab_mine, tab_hist, tab_master, tab_manage, tab_pto = st.tabs(["🙋 MY UPCOMING", "🕰️ WORKED HISTORY", "🏥 MASTER ROSTER", "📝 ASSIGN SHIFTS", "🏝️ REQUEST PTO"])
     else: 
@@ -681,16 +681,27 @@ elif nav == "SCHEDULE":
                 for s in groups[date_key]:
                     owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
                     st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
+                    
+                    # 🚀 NEW: AI Audit Button integrated directly into the Master Roster
                     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
-                        m1, m2, m3 = st.columns([2, 2, 8])
+                        m1, m2, m3, m4 = st.columns([2, 2, 3, 5])
                         if m1.button("❌ Remove", key=f"del_{s[0]}", use_container_width=True):
                             run_transaction("DELETE FROM schedules WHERE shift_id=:id", {"id": s[0]}); st.rerun()
                         if m2.button("📋 Duplicate", key=f"dup_{s[0]}", use_container_width=True):
                             run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:nid, :p, :d, :t, :dept, 'SCHEDULED')", {"nid": f"SCH-{int(time.time()*1000)}{random.randint(10,99)}", "p": s[1], "d": s[2], "t": s[3], "dept": s[4]}); st.rerun()
+                        if m3.button("🧠 AI Audit", key=f"audit_{s[0]}", use_container_width=True):
+                            st.session_state.active_audit = s[0]
+                            st.rerun()
+                            
+                    # Render AI Audit Results directly beneath the shift
+                    if st.session_state.get('active_audit') == s[0]:
+                        f_score, f_hrs, f_notes = calculate_fatigue_score(s[1], s[4])
+                        color = "#10b981" if f_score < 72 else "#f59e0b"
+                        if f_score >= 100: color = "#ef4444"
+                        st.markdown(f"<div style='background:rgba(0,0,0,0.2); padding:15px; border-radius:8px; border-left:4px solid {color}; margin-bottom:15px;'><span style='color:#f8fafc; font-weight:bold; font-size: 0.9rem;'>AI Efficiency Report: {owner}</span><br><span style='color:#94a3b8; font-size:0.85rem;'>Engine Score: {f_score:.1f} | Trailing 14d Hrs: {f_hrs:.1f} <br> Risk Factors: {f_notes if f_notes else 'None (Optimal Assignment)'}</span></div>", unsafe_allow_html=True)
         else: st.info("Master calendar is empty for upcoming dates.")
 
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
-        # 🚀 NEW: Comprehensive Sceduling Desk (Manual Input + AI)
         with tab_manage:
             st.markdown("### 🛠️ Shift Assignment Desk")
             dispatch_mode = st.radio("Select Dispatch Mode", ["Manual Input & AI Analyzer", "AI Auto-Dispatch (Find Best Provider)"], horizontal=True)
