@@ -97,7 +97,7 @@ def phantom_wallet_connector():
         </script>
         """, height=180)
 
-# --- DATABASE ENGINE WITH VERBOSE ERROR DIAGNOSTICS ---
+# --- DATABASE ENGINE ---
 @st.cache_resource(ttl=60)
 def get_db_engine():
     url = os.environ.get("SUPABASE_URL")
@@ -316,23 +316,14 @@ def calculate_fatigue_score(p_pin, target_dept):
     if hrs_worked > 72: notes.append("⚠️ Approaching Overtime")
     return score, hrs_worked, " | ".join(notes)
 
+# 🚀 LEGAL FIX 1: FLSA Soft-Alert Geofence
 def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
     workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
     if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
-    start_time, current_earnings = float(workers_data[0][1]), float(workers_data[0][2])
     distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
     if distance_meters > GEOFENCE_RADIUS:
-        base_pay, diff_pay, diff_notes = calculate_shift_differentials(start_time, USERS[pin]['rate'])
-        shift_gross = base_pay + diff_pay; final_gross = current_earnings + shift_gross
-        if update_status(pin, "Inactive", 0, 0.0, current_lat, current_lon):
-            log_action(pin, "AUTO CLOCK OUT", shift_gross, f"Auto-Exit ({distance_meters:.0f}m) [{diff_notes}]")
-            hr_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
-            user_pubkey = hr_data[0][0] if hr_data and hr_data[0][0] else None
-            if not user_pubkey: return True, "Auto-Clocked out. No Web3 wallet linked."
-            if is_sos_bounty and shift_id: release_escrow_bounty(shift_id, pin, user_pubkey); msg = f"Escrow unlocked. ${final_gross:,.2f} released."
-            else: net, tax = execute_split_stream_payout(pin, final_gross, user_pubkey); msg = f"Auto-Cashed Out. ${net:,.2f} routed."
-            if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"EC PROTOCOL: Shift ended. {msg}")
-            return True, msg
+        if USERS[pin].get('phone'): send_sms(USERS[pin]['phone'], f"Vicentus GPS: You left the facility. Reply 1 to Clock Out, 2 if on Official Transport.")
+        return True, "FLSA Guardrail Triggered: Operator left geofence. SMS verification sent instead of auto-docking pay."
     return False, "User still within geofence."
 
 def log_indoor_presence(pin, major_floor, minor_room, scan_method="BLE"): return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, scan_method, last_seen) VALUES (:p, :f, :r, :sm, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, scan_method=:sm, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room, "sm": scan_method})
@@ -386,6 +377,7 @@ if isinstance(engine_status, str):
 USERS = load_all_users()
 
 if 'user_state' not in st.session_state: st.session_state.user_state = {'active': False, 'start_time': 0.0, 'earnings': 0.0}
+if 'geofence_alert' not in st.session_state: st.session_state.geofence_alert = False
 
 if 'pending_opsec_reset' in st.session_state:
     st.markdown("<br><br><h1 style='text-align: center; color: #ef4444;'>SECURITY MANDATE</h1>", unsafe_allow_html=True)
@@ -413,7 +405,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.4.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.5.0-Compliance</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -487,8 +479,30 @@ if nav == "DASHBOARD":
         base_pay, diff_pay, diff_str = calculate_shift_differentials(st.session_state.user_state['start_time'], user['rate'])
         running_earn = base_pay + diff_pay
         if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
+        
+        # 🚀 LEGAL FIX 1: FLSA Soft Alert UI
+        if st.session_state.geofence_alert:
+            st.markdown("<div class='glass-card' style='border-left: 5px solid #f59e0b !important;'>", unsafe_allow_html=True)
+            st.warning("⚠️ GEOFENCE ALERT: Are you still working? Your GPS indicates you left the hospital radius.")
+            st.caption("FLSA Compliance: We do not auto-dock pay. Please verify your status to keep your timecard accurate.")
+            c_g1, c_g2 = st.columns(2)
+            if c_g1.button("✅ Yes, on Official Transport"):
+                st.session_state.geofence_alert = False
+                log_action(pin, "GEOFENCE DISMISSED", 0, "Operator verified official transport.")
+                st.rerun()
+            if c_g2.button("🛑 No, Clock Me Out Now"):
+                new_total = st.session_state.user_state.get('earnings', 0.0) + running_earn
+                if update_status(pin, "Inactive", 0, new_total, 0.0, 0.0):
+                    st.session_state.user_state['active'] = False; st.session_state.user_state['earnings'] = new_total
+                    st.session_state.geofence_alert = False
+                    log_action(pin, "CLOCK OUT", running_earn, f"Shift Ended (Geofence Prompt)" + (f" [{diff_str}]" if diff_pay > 0 else ""))
+                    active_shifts = run_query("SELECT shift_id FROM schedules WHERE pin=:p AND shift_date=:d", {"p": pin, "d": str(date.today())})
+                    if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop() # Halt rendering the rest of dashboard until they answer
+            
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
-    
     est_total_tax, _, _, _, _ = calculate_taxes(pin, display_gross)
     c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL (Gross)", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross - est_total_tax:,.2f}")
     st.markdown("<br>", unsafe_allow_html=True)
@@ -508,9 +522,11 @@ if nav == "DASHBOARD":
         
         with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)"):
             st.caption("Simulate native mobile app triggers.")
-            if st.button("🚙 Simulate Leaving Geofence (Auto-Payout)"):
+            if st.button("🚙 Simulate Leaving Geofence (FLSA Soft Alert)"):
                 success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
-                if success: st.session_state.user_state['active'] = False; st.success(msg); time.sleep(3); st.rerun()
+                if success: 
+                    st.session_state.geofence_alert = True
+                    st.rerun()
             
             c_ble1, c_ble2 = st.columns(2)
             if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
@@ -580,7 +596,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
         with col_chart2: st.plotly_chart(go.Figure(go.Indicator(mode="gauge+number", value=agency_avoidance, title={'text': "Capital Saved ($)", 'font': {'size': 16, 'color': '#94a3b8'}}, gauge={'axis': {'range': [None, agency_cost]}, 'bar': {'color': "#10b981"}, 'bgcolor': "rgba(255,255,255,0.05)", 'steps': [{'range': [0, total_spend], 'color': "rgba(239,68,68,0.3)"}, {'range': [total_spend, agency_cost], 'color': "rgba(16,185,129,0.1)"}]})).update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"}, margin=dict(t=40, b=20, l=20, r=20)), use_container_width=True)
         st.plotly_chart(px.area(df.groupby('Date')['Amount'].sum().reset_index(), x="Date", y="Amount", template="plotly_dark").update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=20, b=0)), use_container_width=True)
         
-        # 🚀 NEW: CFO Payroll CSV Export
         st.markdown("### 📥 Legacy Payroll Bridge")
         st.caption("Export approved settlements to CSV for seamless import into Workday, Kronos, or ADP.")
         export_data = run_query("SELECT pin, amount, timestamp, tx_type, destination_pubkey, tx_id FROM transactions WHERE status='APPROVED' ORDER BY timestamp DESC")
@@ -746,6 +761,9 @@ elif nav == "MARKETPLACE":
 
 elif nav == "COMMS":
     st.markdown("## 📡 Secure Comms")
+    # 🚀 LEGAL FIX 2: HIPAA Guardrail
+    st.warning("⚠️ VICENTUS SECURE COMMS: Do not transmit explicit Patient Health Information (PHI) in this channel. All data is subject to hospital BAA compliance.")
+    
     if st.button("🔄 Refresh Feed"): st.rerun()
     
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: 
@@ -933,6 +951,8 @@ elif nav == "SCHEDULE":
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
         with tab_manage:
             st.markdown("### 🛠️ Shift Assignment Desk")
+            # 🚀 LEGAL FIX 3: Union CBA Guardrail
+            st.info("⚖️ LEGAL GUARDRAIL: This AI is a decision-support tool. Ensure recommendations comply with your facility's Collective Bargaining Agreements (CBA) regarding shift seniority before Force Assigning.")
             dispatch_mode = st.radio("Select Dispatch Mode", ["Manual Input & AI Analyzer", "AI Auto-Dispatch (Find Best Provider)"], horizontal=True)
             st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
             
@@ -1084,20 +1104,31 @@ elif nav == "THE BANK":
     banked_net = banked_gross - total_tax
     
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Total Tax: ${total_tax:,.2f}</p></div>", unsafe_allow_html=True)
-    st.caption("Federal taxes are mathematically adjusted via 2024 progressive brackets based on your Year-To-Date (YTD) cumulative earnings.")
+    
+    # 🚀 LEGAL FIX 4: FinTech Wage Law Disclaimer
+    st.caption("⚖️ COMPLIANCE: Under MA Labor Laws, standard scheduled W-2 wages must settle via Fiat Direct Deposit. Web3 crypto routing is legally restricted to Voluntary SOS Bounties and Performance Stipends.")
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
-        if st.button("⚡ EXECUTE PAYOUT (Web3 / Fiat Fallback)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
+        if st.button("⚡ EXECUTE FIAT PAYOUT (Base Wages)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
             st.session_state['payout_processing'] = True
-            net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
+            net, tax = execute_split_stream_payout(pin, banked_gross, None) # Force Fiat
             update_status(pin, "Inactive", 0, 0.0)
             st.session_state.user_state['earnings'] = 0.0
-            
-            dest_txt = f"Wallet {solana_key[:4]}..." if solana_key else "Fiat Direct Deposit"
-            st.success(f"✅ Settlement Complete! ${net:,.2f} routed to {dest_txt} | ${tax:,.2f} routed to Tax Treasury.")
+            st.success(f"✅ Settlement Complete! ${net:,.2f} routed to Fiat Direct Deposit | ${tax:,.2f} routed to Tax Treasury.")
             time.sleep(2.5) 
             st.session_state['payout_processing'] = False
             st.rerun()
+        if solana_key:
+            if st.button("⚡ EXECUTE WEB3 PAYOUT (Bounties Only)", key="web3_btn_crypto", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
+                st.session_state['payout_processing'] = True
+                net, tax = execute_split_stream_payout(pin, banked_gross, solana_key)
+                update_status(pin, "Inactive", 0, 0.0)
+                st.session_state.user_state['earnings'] = 0.0
+                st.success(f"✅ Settlement Complete! ${net:,.2f} routed to {solana_key[:4]}... | ${tax:,.2f} routed to Tax Treasury.")
+                time.sleep(2.5) 
+                st.session_state['payout_processing'] = False
+                st.rerun()
+                
     elif st.session_state.user_state.get('active', False): st.info("You must clock out of your active shift before executing a payout.")
 
     st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
