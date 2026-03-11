@@ -192,16 +192,11 @@ def force_cloud_sync(pin):
 def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
 
-# --- 🚀 PROGRESSIVE TAX ENGINE ---
 def calculate_taxes(pin, gross_amount):
-    """Calculates progressive Federal Tax based on YTD earnings, plus flat state/FICA."""
     if gross_amount <= 0.0: return 0.0, 0.0, 0.0, 0.0, 0.0
-    
-    # Calculate Year-To-Date Gross from history
     res = run_query("SELECT SUM(amount) FROM history WHERE pin=:p AND action IN ('CLOCK OUT', 'MANUAL PAYOUT RELEASED') AND EXTRACT(YEAR FROM timestamp) = EXTRACT(YEAR FROM NOW())", {"p": pin})
     ytd_gross = float(res[0][0]) if res and res[0][0] else 0.0
     
-    # 2024 Progressive Federal Tax Brackets (Simplified Single Filer)
     def calculate_federal_bracket(income):
         tax = 0.0
         if income > 191950: tax += (income - 191950) * 0.32; income = 191950
@@ -211,12 +206,10 @@ def calculate_taxes(pin, gross_amount):
         if income > 0: tax += income * 0.10
         return tax
 
-    # Calculate exact marginal tax for this specific paycheck
     fed_tax_before = calculate_federal_bracket(ytd_gross)
     fed_tax_after = calculate_federal_bracket(ytd_gross + gross_amount)
     fed_withholding = fed_tax_after - fed_tax_before
     
-    # Flat State and FICA rates
     ma_withholding = gross_amount * 0.05
     ss_withholding = gross_amount * 0.062
     med_withholding = gross_amount * 0.0145
@@ -224,7 +217,6 @@ def calculate_taxes(pin, gross_amount):
     total_tax = fed_withholding + ma_withholding + ss_withholding + med_withholding
     return total_tax, fed_withholding, ma_withholding, ss_withholding, med_withholding
 
-# --- 📄 PDF PAYSTUB GENERATOR ---
 def create_paystub_pdf(name, date_str, tx_id, gross, net, tax, dest):
     if not PDF_ACTIVE: return None
     try:
@@ -258,17 +250,15 @@ def create_paystub_pdf(name, date_str, tx_id, gross, net, tax, dest):
         
         return pdf.output(dest='S').encode('latin-1')
     except Exception as e:
-        try: return bytes(pdf.output()) # FPDF2 handler
+        try: return bytes(pdf.output()) 
         except: return None
 
 def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     TREASURY_PUBKEY = os.environ.get("IRS_TREASURY_WALLET", "Hospital_Tax_Holding_Wallet_Address")
-    
     total_tax, fed, ma, ss, med = calculate_taxes(pin, gross_amount)
     net_payout = gross_amount - total_tax
     tx_base_id = int(time.time())
     dest_pubkey = user_pubkey if user_pubkey else "FIAT_DIRECT_DEPOSIT"
-    
     note_str = f"Gross: {gross_amount} | Tax: {total_tax}"
     
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type, note) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY', :note)", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": dest_pubkey, "note": note_str})
@@ -416,7 +406,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.0.0-FinTech</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.1.0</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -492,7 +482,6 @@ if nav == "DASHBOARD":
         if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
     
-    # 🚀 NEW: Real-Time Progressive Tax Estimation
     est_total_tax, _, _, _, _ = calculate_taxes(pin, display_gross)
     c1, c2 = st.columns(2); c1.metric("SHIFT ACCRUAL (Gross)", f"${display_gross:,.2f}"); c2.metric("NET ESTIMATE", f"${display_gross - est_total_tax:,.2f}")
     st.markdown("<br>", unsafe_allow_html=True)
@@ -743,6 +732,51 @@ elif nav == "SCHEDULE":
         else: st.info("No worked shift history found.")
 
     with tab_master:
+        # 🚀 NEW: Weekly AI Auditor
+        if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
+            st.markdown("### 🏥 Master Roster")
+            with st.expander("🧠 Run Weekly AI Roster Audit", expanded=False):
+                st.caption("Analyze schedule efficiency and aggregate fatigue risk for a specific 7-day window.")
+                with st.form("weekly_audit_form"):
+                    week_start = st.date_input("Select Week Start Date", value=date.today())
+                    if st.form_submit_button("Analyze Week"):
+                        st.session_state.audit_week_start = week_start
+                        st.rerun()
+            
+            if 'audit_week_start' in st.session_state:
+                ws = st.session_state.audit_week_start
+                we = ws + timedelta(days=7)
+                st.markdown(f"#### 📊 AI Weekly Audit Report ({ws} to {we - timedelta(days=1)})")
+                
+                weekly_shifts = run_query("SELECT pin, count(*) FROM schedules WHERE shift_date >= :start AND shift_date < :end AND status='SCHEDULED' GROUP BY pin", {"start": str(ws), "end": str(we)})
+                
+                if weekly_shifts:
+                    for ws_record in weekly_shifts:
+                        w_pin = ws_record[0]
+                        shift_count = ws_record[1]
+                        est_weekly_hrs = shift_count * 12 
+                        
+                        w_dept = USERS.get(w_pin, {}).get('dept', 'Unknown')
+                        w_name = USERS.get(w_pin, {}).get('name', 'Unknown')
+                        
+                        f_score, f_hrs, f_notes = calculate_fatigue_score(w_pin, w_dept)
+                        projected_score = f_score + (est_weekly_hrs * 1.5) 
+                        
+                        color = "#10b981" 
+                        if shift_count > 3 or projected_score > 80: color = "#f59e0b" 
+                        if shift_count > 4 or projected_score > 100: color = "#ef4444" 
+                        
+                        risk_lvl = "OPTIMAL" if color == "#10b981" else "ELEVATED RISK" if color == "#f59e0b" else "CRITICAL BURNOUT RISK"
+                        
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><div style='display:flex; justify-content:space-between; align-items:center;'><div><strong style='font-size:1.1rem; color:#f8fafc;'>{w_name}</strong> | <span style='color:{color}; font-weight:bold;'>{risk_lvl}</span><br><span style='color:#94a3b8; font-size:0.9rem;'>Scheduled this week: {shift_count} shifts (~{est_weekly_hrs} hrs)</span><br><span style='color:#38bdf8; font-size:0.8rem;'>Base Fatigue: {f_score:.1f} | Projected: {projected_score:.1f} | Notes: {f_notes if f_notes else 'None'}</span></div></div></div>", unsafe_allow_html=True)
+                else:
+                    st.info("No shifts scheduled for this week.")
+                
+                if st.button("Clear Audit Report"):
+                    del st.session_state.audit_week_start
+                    st.rerun()
+                st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+
         all_s = run_query("SELECT shift_id, pin, shift_date, shift_time, department, COALESCE(status, 'SCHEDULED') FROM schedules WHERE shift_date >= :today ORDER BY shift_date ASC, shift_time ASC", {"today": str(date.today())})
         if all_s:
             groups = defaultdict(list)
@@ -753,20 +787,11 @@ elif nav == "SCHEDULE":
                     owner = USERS.get(str(s[1]), {}).get('name', f"User {s[1]}"); lbl = "<span style='color:#ff453a; margin-left:10px;'>🚨 SICK</span>" if s[5]=="CALL_OUT" else "<span style='color:#f59e0b; margin-left:10px;'>🔄 TRADING</span>" if s[5]=="MARKETPLACE" else ""
                     st.markdown(f"<div class='sched-row'><div class='sched-time'>{s[3]}</div><div style='flex-grow: 1; padding-left: 15px;'><span class='sched-name'>{'⭐ ' if str(s[1])==pin else ''}{owner}</span> {lbl}</div></div>", unsafe_allow_html=True)
                     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
-                        m1, m2, m3, m4 = st.columns([2, 2, 3, 5])
+                        m1, m2 = st.columns(2)
                         if m1.button("❌ Remove", key=f"del_{s[0]}", use_container_width=True):
                             run_transaction("DELETE FROM schedules WHERE shift_id=:id", {"id": s[0]}); st.rerun()
                         if m2.button("📋 Duplicate", key=f"dup_{s[0]}", use_container_width=True):
                             run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:nid, :p, :d, :t, :dept, 'SCHEDULED')", {"nid": f"SCH-{int(time.time()*1000)}{random.randint(10,99)}", "p": s[1], "d": s[2], "t": s[3], "dept": s[4]}); st.rerun()
-                        if m3.button("🧠 AI Audit", key=f"audit_{s[0]}", use_container_width=True):
-                            st.session_state.active_audit = s[0]
-                            st.rerun()
-                            
-                    if st.session_state.get('active_audit') == s[0]:
-                        f_score, f_hrs, f_notes = calculate_fatigue_score(s[1], s[4])
-                        color = "#10b981" if f_score < 72 else "#f59e0b"
-                        if f_score >= 100: color = "#ef4444"
-                        st.markdown(f"<div style='background:rgba(0,0,0,0.2); padding:15px; border-radius:8px; border-left:4px solid {color}; margin-bottom:15px;'><span style='color:#f8fafc; font-weight:bold; font-size: 0.9rem;'>AI Efficiency Report: {owner}</span><br><span style='color:#94a3b8; font-size:0.85rem;'>Engine Score: {f_score:.1f} | Trailing 14d Hrs: {f_hrs:.1f} <br> Risk Factors: {f_notes if f_notes else 'None (Optimal Assignment)'}</span></div>", unsafe_allow_html=True)
         else: st.info("Master calendar is empty for upcoming dates.")
 
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
@@ -918,7 +943,6 @@ elif nav == "THE BANK":
     db_user_data = run_query("SELECT solana_pubkey FROM enterprise_users WHERE pin=:p", {"p": pin})
     solana_key = db_user_data[0][0] if db_user_data and db_user_data[0][0] else None
     
-    # 🚀 NEW: Progressive Tax UI Integration
     banked_gross = st.session_state.user_state.get('earnings', 0.0)
     total_tax, fed_tx, ma_tx, ss_tx, med_tx = calculate_taxes(pin, banked_gross)
     banked_net = banked_gross - total_tax
@@ -955,7 +979,6 @@ elif nav == "THE BANK":
                 st.success("✅ Exception submitted to management.")
                 time.sleep(1.5); st.rerun()
 
-    # 🚀 NEW: Ledger & Pay Stubs (PDF Generator)
     st.markdown("### 📄 Ledger & Pay Stubs")
     st.caption("Download official PDF receipts for all Web3 and Fiat payouts.")
     
