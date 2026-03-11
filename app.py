@@ -136,13 +136,15 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
             
-            # --- ACUITY & COMMS UPGRADE ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
             except: pass
             
+            # --- COMMS UPGRADE ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, sender_pin text, target_dept text, message text, is_sos boolean DEFAULT FALSE, timestamp timestamp DEFAULT NOW());"))
             try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_sos boolean DEFAULT FALSE;"))
+            except: pass
+            try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_pin text;"))
             except: pass
 
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
@@ -413,7 +415,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.2.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.3.0</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -463,7 +465,6 @@ with c2:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
-# 🚀 NEW: Routing Update to include COMMS
 if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS", "COMMS"]
 elif user['level'] in ["Manager", "Director", "Supervisor"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "COMMS", "MY PROFILE"]
 else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "COMMS", "MY PROFILE"]
@@ -651,7 +652,6 @@ elif nav == "CENSUS & ACUITY":
         if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
             rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
             
-            # 🚀 NEW: Census SOS Button writes to the COMMS Engine AND sends SMS
             sos_text = f"CRITICAL CENSUS SURGE: {abs(variance)} operators needed in {user['dept']}. Claim in Marketplace."
             run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": user['dept'], "m": sos_text})
             
@@ -722,13 +722,15 @@ elif nav == "MARKETPLACE":
                     st.error("❌ Shift Already Claimed! Another operator secured this bounty."); time.sleep(2); st.rerun()
     else: st.markdown("<div class='empty-state'><h3>No Surge Bounties Active</h3></div>", unsafe_allow_html=True)
 
-# 🚀 NEW: COMMS MODULE
+# 🚀 NEW: DIRECT MESSAGING COMMS UPGRADE
 elif nav == "COMMS":
     st.markdown("## 📡 Secure Comms")
     if st.button("🔄 Refresh Feed"): st.rerun()
     
-    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: tab_intra, tab_inter, tab_sos = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide", "🚨 SOS Dispatch"])
-    else: tab_intra, tab_inter = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide"])
+    if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]: 
+        tab_intra, tab_inter, tab_dm, tab_sos = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide", "💬 Direct Messages", "🚨 SOS Dispatch"])
+    else: 
+        tab_intra, tab_inter, tab_dm = st.tabs([f"🏥 {user['dept']} Channel", "🌍 Hospital-Wide", "💬 Direct Messages"])
     
     with tab_intra:
         with st.form("intra_chat"):
@@ -763,6 +765,38 @@ elif nav == "COMMS":
                 bg_color = "rgba(239, 68, 68, 0.1)" if m[3] else "rgba(30, 41, 59, 0.6)"
                 st.markdown(f"<div style='background: {bg_color}; border-left: 4px solid {color}; padding: 15px; border-radius: 8px; margin-bottom: 10px;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.8rem;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div>", unsafe_allow_html=True)
         else: st.info("No global comms found.")
+
+    with tab_dm:
+        peer_dict = {f"{d['name']} ({d['role']} - {d['dept']})": p for p, d in USERS.items() if p != pin}
+        if not peer_dict:
+            st.info("No other operators found in the enterprise directory.")
+        else:
+            selected_peer_name = st.selectbox("Select Operator to Message", list(peer_dict.keys()))
+            selected_peer_pin = peer_dict[selected_peer_name]
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.form("dm_chat"):
+                dm_msg = st.text_input("Encrypted Message")
+                if st.form_submit_button("Send Direct Message"):
+                    run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, recipient_pin, message) VALUES (:id, :p, 'DM', :rp, :m)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "rp": selected_peer_pin, "m": dm_msg})
+                    st.rerun()
+            
+            st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+            dm_history = run_query("SELECT sender_pin, message, timestamp FROM messages WHERE target_dept='DM' AND ((sender_pin=:p AND recipient_pin=:rp) OR (sender_pin=:rp AND recipient_pin=:p)) ORDER BY timestamp DESC LIMIT 50", {"p": pin, "rp": selected_peer_pin})
+            
+            if dm_history:
+                for m in dm_history:
+                    is_me = (m[0] == pin)
+                    sender_name = "You" if is_me else USERS.get(str(m[0]), {}).get('name', 'Unknown')
+                    dt_str = m[2].strftime('%H:%M - %b %d') if hasattr(m[2], 'strftime') else str(m[2])
+                    
+                    align = "right" if is_me else "left"
+                    bg_color = "rgba(16, 185, 129, 0.15)" if is_me else "rgba(30, 41, 59, 0.6)"
+                    border_color = "#10b981" if is_me else "#3b82f6"
+                    
+                    st.markdown(f"<div style='text-align: {align}; margin-bottom: 10px;'><div style='display: inline-block; text-align: left; background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px 15px; border-radius: 8px; min-width: 250px; max-width: 80%;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.75rem; margin-left:15px;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div></div>", unsafe_allow_html=True)
+            else:
+                st.info(f"Start an encrypted conversation with {selected_peer_name.split(' ')[0]}.")
 
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
         with tab_sos:
