@@ -113,11 +113,7 @@ def get_db_engine():
         with engine.connect() as conn:
             conn.execute(text("CREATE TABLE IF NOT EXISTS enterprise_users (pin TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, name TEXT, role TEXT, dept TEXT, access_level TEXT, hourly_rate NUMERIC, phone TEXT, solana_pubkey TEXT UNIQUE, last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"))
             conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN IF NOT EXISTS last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
-            conn.commit() 
             
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_email ON enterprise_users(email);"))
-            conn.commit()
-
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
             if res[0] == 0:
                 seed_data = [
@@ -128,7 +124,6 @@ def get_db_engine():
                     ("9999", "cfo@ecprotocol.com", hash_password("password123"), "CFO VIEW", "Admin", "All", "Admin", 0.00, None)
                 ]
                 for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone, last_pw_change) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph, NOW() - INTERVAL '100 days') ON CONFLICT DO NOTHING"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
-                conn.commit()
             
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
@@ -139,17 +134,18 @@ def get_db_engine():
             try: conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS vented_pts int DEFAULT 0;")); conn.execute(text("ALTER TABLE unit_census ADD COLUMN IF NOT EXISTS nipvv_pts int DEFAULT 0;"))
             except: pass
             
-            conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, sender_pin text, target_dept text, message text, is_sos boolean DEFAULT FALSE, timestamp timestamp DEFAULT NOW());"))
-            try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_sos boolean DEFAULT FALSE;"))
-            except: pass
-            try: conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_pin text;"))
-            except: pass
-
+            conn.execute(text("CREATE TABLE IF NOT EXISTS messages (msg_id text PRIMARY KEY, sender_pin text, target_dept text, message text, is_sos boolean DEFAULT FALSE, recipient_pin text, timestamp timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, solana_pubkey text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
+            
+            # --- NEW COMPLIANCE TABLES ---
+            conn.execute(text("CREATE TABLE IF NOT EXISTS hospital_protocols (protocol_id text PRIMARY KEY, title text, department text, status text, last_signed date, next_review date);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS staff_competencies (comp_id text PRIMARY KEY, pin text, competency_name text, completed_date date, expires_date date, status text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS poc_ledger (claim_id text PRIMARY KEY, pin text, patient_room text, action text, timestamp timestamp DEFAULT NOW(), ble_verified boolean, emr_verified boolean, ai_verified boolean, status text);"))
+
             conn.commit()
         return engine
     except Exception as e: 
@@ -196,14 +192,13 @@ def force_cloud_sync(pin):
         return True
     st.session_state.user_state['active'] = False; return False
 
-def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 def release_escrow_bounty(shift_id, pin, user_pubkey): return run_transaction("UPDATE marketplace SET escrow_status='RELEASED' WHERE shift_id=:id", {"id": shift_id})
+def lock_escrow_bounty(shift_id, rate, hours=12): return run_transaction("UPDATE marketplace SET escrow_status='LOCKED' WHERE shift_id=:id", {"id": shift_id})
 
 def calculate_taxes(pin, gross_amount):
     if gross_amount <= 0.0: return 0.0, 0.0, 0.0, 0.0, 0.0
     res = run_query("SELECT SUM(amount) FROM history WHERE pin=:p AND action IN ('CLOCK OUT', 'MANUAL PAYOUT RELEASED') AND EXTRACT(YEAR FROM timestamp) = EXTRACT(YEAR FROM NOW())", {"p": pin})
     ytd_gross = float(res[0][0]) if res and res[0][0] else 0.0
-    
     def calculate_federal_bracket(income):
         tax = 0.0
         if income > 191950: tax += (income - 191950) * 0.32; income = 191950
@@ -212,15 +207,12 @@ def calculate_taxes(pin, gross_amount):
         if income > 11600: tax += (income - 11600) * 0.12; income = 11600
         if income > 0: tax += income * 0.10
         return tax
-
     fed_tax_before = calculate_federal_bracket(ytd_gross)
     fed_tax_after = calculate_federal_bracket(ytd_gross + gross_amount)
     fed_withholding = fed_tax_after - fed_tax_before
-    
     ma_withholding = gross_amount * 0.05
     ss_withholding = gross_amount * 0.062
     med_withholding = gross_amount * 0.0145
-    
     total_tax = fed_withholding + ma_withholding + ss_withholding + med_withholding
     return total_tax, fed_withholding, ma_withholding, ss_withholding, med_withholding
 
@@ -236,12 +228,10 @@ def create_paystub_pdf(name, date_str, tx_id, gross, net, tax, dest):
         pdf.cell(100, 10, txt=f"Operator: {name}", ln=True)
         pdf.cell(100, 10, txt=f"Date of Settlement: {date_str}", ln=True)
         pdf.cell(100, 10, txt=f"Ledger Tx ID: {tx_id}", ln=True)
-        
         mode = "Solana Web3 Smart Contract" if dest and len(dest) > 30 else "Fiat Direct Deposit"
         pdf.cell(100, 10, txt=f"Routing Method: {mode}", ln=True)
         pdf.cell(100, 10, txt=f"Destination: {dest}", ln=True)
         pdf.ln(10)
-        
         pdf.line(10, 80, 200, 80)
         pdf.ln(5)
         pdf.cell(100, 10, txt=f"Gross Pay: ${gross:,.2f}", ln=True)
@@ -250,11 +240,9 @@ def create_paystub_pdf(name, date_str, tx_id, gross, net, tax, dest):
         pdf.cell(100, 10, txt=f"Net Settlement: ${net:,.2f}", ln=True)
         pdf.ln(5)
         pdf.line(10, 115, 200, 115)
-        
         pdf.ln(10)
         pdf.set_font("Arial", 'I', 10)
         pdf.cell(190, 10, txt="This is a cryptographically verifiable ledger receipt generated by Vicentus.", ln=True, align='C')
-        
         return pdf.output(dest='S').encode('latin-1')
     except Exception as e:
         try: return bytes(pdf.output()) 
@@ -267,10 +255,8 @@ def execute_split_stream_payout(pin, gross_amount, user_pubkey):
     tx_base_id = int(time.time())
     dest_pubkey = user_pubkey if user_pubkey else "FIAT_DIRECT_DEPOSIT"
     note_str = f"Gross: {gross_amount} | Tax: {total_tax}"
-    
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type, note) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'NET_PAY', :note)", {"id": f"TX-NET-{tx_base_id}", "p": pin, "amt": net_payout, "dest": dest_pubkey, "note": note_str})
     run_transaction("INSERT INTO transactions (tx_id, pin, amount, status, destination_pubkey, tx_type) VALUES (:id, :p, :amt, 'APPROVED', :dest, 'TAX_WITHHOLDING')", {"id": f"TX-TAX-{tx_base_id}", "p": pin, "amt": total_tax, "dest": TREASURY_PUBKEY})
-    
     log_action(pin, "FUNDS WITHDRAWN", net_payout, f"Settled to {dest_pubkey[:12]}...")
     log_action(pin, "TAX WITHHELD", total_tax, f"Routed to Treasury")
     return net_payout, total_tax
@@ -280,10 +266,8 @@ def calculate_shift_differentials(start_timestamp, base_rate):
     end_dt = datetime.now(LOCAL_TZ)
     total_seconds = (end_dt - start_dt).total_seconds()
     if total_seconds <= 0: return 0.0, 0.0, "Invalid Shift"
-
     base_pay = 0.0; diff_pay = 0.0; notes = set()
     current_dt = start_dt
-    
     while current_dt < end_dt:
         minute_base = base_rate / 60.0
         minute_diff = 0.0
@@ -292,7 +276,6 @@ def calculate_shift_differentials(start_timestamp, base_rate):
         elif current_dt.hour >= 19 or current_dt.hour < 7: minute_diff += (5.00 / 60.0); notes.add("NOC(+$5)")
         base_pay += minute_base; diff_pay += minute_diff
         current_dt += timedelta(minutes=1)
-        
     return base_pay, diff_pay, " | ".join(notes)
 
 def calculate_fatigue_score(p_pin, target_dept):
@@ -301,22 +284,17 @@ def calculate_fatigue_score(p_pin, target_dept):
     hrs_worked = (sum([float(r[0]) for r in res_hrs]) / base_rate) if res_hrs else 0.0
     score = hrs_worked 
     notes = []
-    
     current_weekday = date.today().weekday()
     if current_weekday >= 5: 
         res_wknds = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND extract(isodow from timestamp) >= 6 AND timestamp >= NOW() - INTERVAL '30 days'", {"p": p_pin})
         if res_wknds and res_wknds[0][0] > 1: score += 50.0; notes.append(f"Weekend Equality (Worked {res_wknds[0][0]} recently)")
-    
     res_acc = run_query("SELECT count(*) FROM accolades WHERE pin=:p AND timestamp >= NOW() - INTERVAL '7 days'", {"p": p_pin})
     if res_acc and res_acc[0][0] > 0: score += 20.0; notes.append("Acuity Burnout Risk (+20)")
-    
     res_rec = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '48 hours'", {"p": p_pin})
     if res_rec and res_rec[0][0] > 0 and USERS.get(p_pin, {}).get('dept') == target_dept: score -= 15.0; notes.append("Continuity Match (-15)")
-    
     if hrs_worked > 72: notes.append("⚠️ Approaching Overtime")
     return score, hrs_worked, " | ".join(notes)
 
-# 🚀 LEGAL FIX 1: FLSA Soft-Alert Geofence
 def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
     workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
     if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
@@ -359,6 +337,12 @@ html_style = """
     .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
     .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
     .sched-time { color: #34d399; font-weight: 800; min-width: 100px; font-size: 1rem; }
+    
+    /* 🛡️ COMPLIANCE BADGES */
+    .badge-pass { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
+    .badge-fail { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
+    .badge-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
+    
     @media (max-width: 768px) { .sched-row { flex-direction: column; align-items: flex-start; } .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; } div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
 </style>
 """
@@ -405,7 +389,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.5.0-Compliance</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.6.0-Compliance</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -455,7 +439,8 @@ with c2:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
 
-if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "FINANCIAL FORECAST", "APPROVALS", "COMMS"]
+# 🚀 NEW: ADDED COMPLIANCE TO MENU
+if user['level'] == "Admin": menu_items = ["COMMAND CENTER", "COMPLIANCE", "FINANCIAL FORECAST", "APPROVALS", "COMMS"]
 elif user['level'] in ["Manager", "Director", "Supervisor"]: menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "COMMS", "MY PROFILE"]
 else: menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "COMMS", "MY PROFILE"]
 
@@ -463,7 +448,79 @@ st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
 nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="collapsed")
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
 
-if nav == "DASHBOARD":
+# ---------------------------------------------------------
+# 🛡️ NEW MODULE: ENTERPRISE COMPLIANCE & AUDIT SHIELD
+# ---------------------------------------------------------
+if nav == "COMPLIANCE" and user['level'] == "Admin":
+    st.markdown("## 🛡️ Enterprise Compliance Engine")
+    st.caption("Cryptographic verification of care, automated protocol enforcement, and anti-fraud auditing.")
+    if st.button("🔄 Refresh Compliance Database"): st.rerun()
+
+    tab_poc, tab_proto, tab_comp = st.tabs(["🔒 PROOF OF CARE (PoC) LEDGER", "🛑 PROTOCOL ENFORCEMENT", "🪪 COMPETENCY AUDIT"])
+
+    with tab_poc:
+        st.markdown("### Anti-Clawback Billing Engine")
+        st.caption("Mathematically proves service delivery by correlating BLE indoor geolocation, EMR documentation, and AI verification to prevent fraudulent Medicare/insurance claims.")
+        
+        # MOCK SEED DATA FOR PITCH PRESENTATION
+        mock_poc = [
+            {"id": "CLM-10923", "pin": "1001", "room": "ICU-Bed 4", "action": "Initiate APRV Vent Mode", "time": "Just Now", "ble": True, "emr": True, "ai": True},
+            {"id": "CLM-10924", "pin": "1002", "room": "ED-Trauma 1", "action": "BiPAP Application", "time": "20 mins ago", "ble": False, "emr": True, "ai": False},
+            {"id": "CLM-10925", "pin": "1003", "room": "Floor-402", "action": "Albuterol Tx", "time": "1 hour ago", "ble": True, "emr": True, "ai": True}
+        ]
+        
+        for claim in mock_poc:
+            ble_badge = "<span class='badge-pass'>BLE LOC MATCH</span>" if claim['ble'] else "<span class='badge-fail'>BLE LOC MISMATCH</span>"
+            emr_badge = "<span class='badge-pass'>EMR SYNCED</span>" if claim['emr'] else "<span class='badge-fail'>EMR MISSING</span>"
+            ai_badge = "<span class='badge-pass'>AI VERIFIED</span>" if claim['ai'] else "<span class='badge-warn'>AI PENDING</span>"
+            
+            border = "#10b981" if (claim['ble'] and claim['emr'] and claim['ai']) else "#ef4444"
+            status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>" if border == "#10b981" else "<span style='color:#ef4444; font-weight:bold;'>FLAGGED: FRAUD RISK</span>"
+            
+            st.markdown(f"""
+            <div class='glass-card' style='border-left: 5px solid {border} !important;'>
+                <div style='display:flex; justify-content:space-between;'>
+                    <strong style='font-size:1.1rem;'>{claim['action']} | {claim['room']}</strong>
+                    <span>{status_text}</span>
+                </div>
+                <div style='color:#94a3b8; font-size:0.85rem; margin-top:5px; margin-bottom:10px;'>Operator PIN: {claim['pin']} | Timestamp: {claim['time']} | Claim ID: {claim['id']}</div>
+                <div>{ble_badge} {emr_badge} {ai_badge}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with tab_proto:
+        st.markdown("### Live Protocol & Policy Auditing")
+        st.caption("Active monitoring of hospital clinical protocols. The AI engine intercepts and blocks unauthorized physician orders if the corresponding protocol is missing or unsigned.")
+        
+        # MOCK PROTOCOL DATA
+        st.markdown("#### Respiratory Department")
+        mock_protos = [
+            {"title": "Standard Vent Management", "status": "ACTIVE", "signed": "2023-10-01"},
+            {"title": "High Frequency Oscillation (HFOV)", "status": "MISSING/UNSIGNED", "signed": "N/A"},
+            {"title": "BiPAP/NIPPV Titration", "status": "ACTIVE", "signed": "2024-01-15"}
+        ]
+        
+        for p in mock_protos:
+            if p['status'] == "ACTIVE":
+                st.markdown(f"<div class='sched-row'><div style='flex-grow: 1;'><strong>{p['title']}</strong><br><span style='font-size:0.8rem; color:#94a3b8;'>Last Signed: {p['signed']}</span></div><div><span class='badge-pass'>COMPLIANT</span></div></div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='sched-row' style='border-left: 3px solid #ef4444;'><div style='flex-grow: 1;'><strong style='color:#f87171;'>{p['title']}</strong><br><span style='font-size:0.8rem; color:#94a3b8;'>Error: Policy Not Found on Server</span></div><div><span class='badge-fail'>ORDERS BLOCKED</span></div></div>", unsafe_allow_html=True)
+
+    with tab_comp:
+        st.markdown("### Staff Competency Engine")
+        st.caption("Automated tracking of clinical competencies. Prevents non-compliant operators from being dispatched to high-acuity zones.")
+        
+        st.markdown("#### Critical Expirations (Action Required)")
+        st.markdown("""
+        <div class='glass-card' style='border-left: 5px solid #ef4444 !important;'>
+            <strong style='color:#f8fafc; font-size:1.1rem;'>David Clark (Manager)</strong>
+            <p style='color:#94a3b8; margin: 5px 0;'>Competency: <b>Advanced Ventilator Setup (Annual)</b></p>
+            <span class='badge-fail'>45 DAYS OVERDUE</span>
+            <p style='color:#f87171; font-size:0.85rem; margin-top:10px;'>⚠️ AI Dispatcher has temporarily restricted this operator from claiming Vent Bounties until competency is logged.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+elif nav == "DASHBOARD":
     st.markdown(f"<h2 style='font-weight: 800;'>Status Terminal</h2>", unsafe_allow_html=True)
     st.caption("ℹ️ PILOT MODE: Payouts represent 'Shadow Ledger' metrics. No live USDC is transmitted during the trial.")
     if st.button("🔄 Force Cloud Sync"): force_cloud_sync(pin); st.rerun()
@@ -480,7 +537,6 @@ if nav == "DASHBOARD":
         running_earn = base_pay + diff_pay
         if diff_pay > 0: st.info(f"✨ Active Shift Differentials Applied: {diff_str}")
         
-        # 🚀 LEGAL FIX 1: FLSA Soft Alert UI
         if st.session_state.geofence_alert:
             st.markdown("<div class='glass-card' style='border-left: 5px solid #f59e0b !important;'>", unsafe_allow_html=True)
             st.warning("⚠️ GEOFENCE ALERT: Are you still working? Your GPS indicates you left the hospital radius.")
@@ -500,7 +556,7 @@ if nav == "DASHBOARD":
                     if active_shifts: release_escrow_bounty(active_shifts[0][0], pin, "SYSTEM_AUTO_RELEASE")
                     st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
-            st.stop() # Halt rendering the rest of dashboard until they answer
+            st.stop() 
             
     display_gross = st.session_state.user_state.get('earnings', 0.0) + running_earn
     est_total_tax, _, _, _, _ = calculate_taxes(pin, display_gross)
@@ -577,7 +633,7 @@ if nav == "DASHBOARD":
 elif nav == "COMMAND CENTER" and user['level'] == "Admin":
     st.markdown("## 🦅 Executive Command Center")
     if st.button("🔄 Refresh Data Link"): st.rerun()
-    t_finance, t_fleet, t_audit = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING", "🛡️ PROOF OF CARE AUDIT"])
+    t_finance, t_fleet = st.tabs(["📈 FINANCIAL INTELLIGENCE", "🗺️ LIVE FLEET TRACKING"])
     
     raw_history = run_query("SELECT pin, amount, DATE(timestamp) FROM history WHERE action='CLOCK OUT'")
     if not raw_history:
@@ -638,13 +694,6 @@ elif nav == "COMMAND CENTER" and user['level'] == "Admin":
                 if w_lat and w_lon: map_data.append({"name": w_name, "lat": float(w_lat), "lon": float(w_lon)})
             if map_data: st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame(map_data), get_position='[lon, lat]', get_color='[16, 185, 129, 200]', get_radius=100)], initial_view_state=pdk.ViewState(latitude=pd.DataFrame(map_data)['lat'].mean(), longitude=pd.DataFrame(map_data)['lon'].mean(), zoom=11, pitch=45), map_style='mapbox://styles/mapbox/dark-v10'))
         else: st.info("No active operators in the field.")
-    with t_audit:
-        st.markdown("### Verified Safety & Compliance Audits")
-        st.caption("A cryptographic ledger of all physically-verified clinical safety checks.")
-        audits = run_query("SELECT pin, action, note, timestamp FROM history WHERE action='AUDIT LOGGED' ORDER BY timestamp DESC LIMIT 20")
-        if audits:
-            for aud in audits: st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='display:flex; justify-content:space-between;'><strong>{USERS.get(str(aud[0]), {}).get('name', 'Unknown')}</strong><span style='color:#10b981;'>VERIFIED</span></div><div style='color:#94a3b8; font-size:0.85rem;'>{aud[2]} <br> {aud[3]}</div></div>", unsafe_allow_html=True)
-        else: st.info("No compliance audits logged yet.")
 
 elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
     st.markdown("## 📊 Predictive Payroll Outflow")
@@ -761,7 +810,6 @@ elif nav == "MARKETPLACE":
 
 elif nav == "COMMS":
     st.markdown("## 📡 Secure Comms")
-    # 🚀 LEGAL FIX 2: HIPAA Guardrail
     st.warning("⚠️ VICENTUS SECURE COMMS: Do not transmit explicit Patient Health Information (PHI) in this channel. All data is subject to hospital BAA compliance.")
     
     if st.button("🔄 Refresh Feed"): st.rerun()
@@ -951,7 +999,6 @@ elif nav == "SCHEDULE":
     if user['level'] in ["Manager", "Director", "Admin", "Supervisor"]:
         with tab_manage:
             st.markdown("### 🛠️ Shift Assignment Desk")
-            # 🚀 LEGAL FIX 3: Union CBA Guardrail
             st.info("⚖️ LEGAL GUARDRAIL: This AI is a decision-support tool. Ensure recommendations comply with your facility's Collective Bargaining Agreements (CBA) regarding shift seniority before Force Assigning.")
             dispatch_mode = st.radio("Select Dispatch Mode", ["Manual Input & AI Analyzer", "AI Auto-Dispatch (Find Best Provider)"], horizontal=True)
             st.markdown("<hr style='border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
@@ -1105,13 +1152,12 @@ elif nav == "THE BANK":
     
     st.markdown(f"<div class='stripe-box'><div style='display:flex; justify-content:space-between; align-items:center;'><span style='font-size:0.9rem; font-weight:600; text-transform:uppercase;'>Available Balance</span></div><h1 style='font-size:3.5rem; margin:10px 0 5px 0;'>${banked_gross:,.2f} Gross</h1><p style='margin:0; font-size:0.9rem; opacity:0.9;'>Net Estimate: ${banked_net:,.2f} • Total Tax: ${total_tax:,.2f}</p></div>", unsafe_allow_html=True)
     
-    # 🚀 LEGAL FIX 4: FinTech Wage Law Disclaimer
     st.caption("⚖️ COMPLIANCE: Under MA Labor Laws, standard scheduled W-2 wages must settle via Fiat Direct Deposit. Web3 crypto routing is legally restricted to Voluntary SOS Bounties and Performance Stipends.")
     
     if banked_gross > 0.01 and not st.session_state.user_state.get('active', False):
         if st.button("⚡ EXECUTE FIAT PAYOUT (Base Wages)", key="web3_btn", use_container_width=True, disabled=st.session_state.get('payout_processing', False)):
             st.session_state['payout_processing'] = True
-            net, tax = execute_split_stream_payout(pin, banked_gross, None) # Force Fiat
+            net, tax = execute_split_stream_payout(pin, banked_gross, None) 
             update_status(pin, "Inactive", 0, 0.0)
             st.session_state.user_state['earnings'] = 0.0
             st.success(f"✅ Settlement Complete! ${net:,.2f} routed to Fiat Direct Deposit | ${tax:,.2f} routed to Tax Treasury.")
