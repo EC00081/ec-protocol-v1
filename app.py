@@ -46,6 +46,11 @@ def verify_password(plain_text_password, hashed_password):
     except Exception: return False
 def generate_secure_checksum(doc_number, pin): return hashlib.sha256(f"{doc_number}-{pin}-{os.environ.get('SECURE_SALT', 'EC_PROTOCOL_ENTERPRISE_SALT')}".encode('utf-8')).hexdigest()
 
+# NEW: PoC Cryptographic Hashing Engine
+def generate_poc_hash(claim_id, pin, room, action, timestamp_str):
+    raw_data = f"{claim_id}|{pin}|{room}|{action}|{timestamp_str}|{os.environ.get('SECURE_SALT', 'CLINICAL_LEDGER_SALT')}"
+    return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
+
 # --- DATABASE ENGINE ---
 @st.cache_resource(ttl=60)
 def get_db_engine():
@@ -93,7 +98,11 @@ def get_db_engine():
             # --- COMPLIANCE TABLES ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS hospital_protocols (protocol_id text PRIMARY KEY, title text, department text, status text, last_signed date, next_review date);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS staff_competencies (comp_id text PRIMARY KEY, pin text, competency_name text, completed_date date, expires_date date, status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS poc_ledger (claim_id text PRIMARY KEY, pin text, patient_room text, action text, timestamp timestamp DEFAULT NOW(), ble_verified boolean, emr_verified boolean, ai_verified boolean, status text);"))
+            
+            # UPGRADED PoC LEDGER WITH SECURE HASH
+            conn.execute(text("CREATE TABLE IF NOT EXISTS poc_ledger (claim_id text PRIMARY KEY, pin text, patient_room text, action text, timestamp timestamp DEFAULT NOW(), ble_verified boolean, emr_verified boolean, ai_verified boolean, status text, secure_hash text);"))
+            try: conn.execute(text("ALTER TABLE poc_ledger ADD COLUMN IF NOT EXISTS secure_hash text;"))
+            except: pass
 
             conn.commit()
         return engine
@@ -243,7 +252,7 @@ def calculate_fatigue_score(p_pin, target_dept):
     if hrs_worked > 72: notes.append("⚠️ Approaching Overtime")
     return score, hrs_worked, " | ".join(notes)
 
-def process_background_location_ping(pin, current_lat, current_lon, shift_id=None, is_sos_bounty=False):
+def process_background_location_ping(pin, current_lat, current_lon, shift_id=None):
     workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
     if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
     distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
@@ -274,10 +283,10 @@ html_style = """
     .stButton>button { width: 100%; height: 55px; border-radius: 12px; font-weight: 700; font-size: 1rem; border: none; transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); letter-spacing: 0.5px; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
-    .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(245, 158, 11, 0.3); border-left: 5px solid #f59e0b; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
-    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(245, 158, 11, 0.6); }
-    .bounty-card::before { content: '⚡ SURGE ACTIVE'; position: absolute; top: 18px; right: -35px; background: #f59e0b; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
-    .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #10b981; margin: 10px 0; text-shadow: 0 0 25px rgba(16, 185, 129, 0.2); letter-spacing: -1px; }
+    .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(16, 185, 129, 0.3); border-left: 5px solid #10b981; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
+    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(16, 185, 129, 0.6); }
+    .bounty-card::before { content: 'URGENT COVERAGE'; position: absolute; top: 18px; right: -35px; background: #10b981; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
+    .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #f8fafc; margin: 10px 0; letter-spacing: -1px; }
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
@@ -289,6 +298,7 @@ html_style = """
     .badge-pass { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
     .badge-fail { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
     .badge-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
+    .hash-text { font-family: monospace; color: #38bdf8; font-size: 0.75rem; word-break: break-all; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; margin-top: 8px; border: 1px solid rgba(56, 189, 248, 0.2); }
     
     @media (max-width: 768px) { .sched-row { flex-direction: column; align-items: flex-start; } .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; } div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
 </style>
@@ -336,7 +346,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.7.0-Fiat</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.8.0-Immutable</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -406,12 +416,13 @@ if nav == "COMPLIANCE" and user['level'] == "Admin":
 
     with tab_poc:
         st.markdown("### Anti-Clawback Billing Engine")
-        st.caption("Mathematically proves service delivery by correlating BLE indoor geolocation, EMR documentation, and AI verification to prevent fraudulent Medicare/insurance claims.")
+        st.caption("Mathematically proves service delivery by correlating BLE indoor geolocation, EMR documentation, and AI verification, sealed with an immutable SHA-256 cryptographic hash.")
         
+        # MOCK DATA INJECTED WITH REAL HASH GENERATION FOR DEMO
         mock_poc = [
-            {"id": "CLM-10923", "pin": "1001", "room": "ICU-Bed 4", "action": "Initiate APRV Vent Mode", "time": "Just Now", "ble": True, "emr": True, "ai": True},
-            {"id": "CLM-10924", "pin": "1002", "room": "ED-Trauma 1", "action": "BiPAP Application", "time": "20 mins ago", "ble": False, "emr": True, "ai": False},
-            {"id": "CLM-10925", "pin": "1003", "room": "Floor-402", "action": "Albuterol Tx", "time": "1 hour ago", "ble": True, "emr": True, "ai": True}
+            {"id": "CLM-10923", "pin": "1001", "room": "ICU-Bed 4", "action": "Initiate APRV Vent Mode", "time": "2024-04-18 14:02:11", "ble": True, "emr": True, "ai": True},
+            {"id": "CLM-10924", "pin": "1002", "room": "ED-Trauma 1", "action": "BiPAP Application", "time": "2024-04-18 13:40:05", "ble": False, "emr": True, "ai": False},
+            {"id": "CLM-10925", "pin": "1003", "room": "Floor-402", "action": "Albuterol Tx", "time": "2024-04-18 12:15:00", "ble": True, "emr": True, "ai": True}
         ]
         
         for claim in mock_poc:
@@ -422,6 +433,9 @@ if nav == "COMPLIANCE" and user['level'] == "Admin":
             border = "#10b981" if (claim['ble'] and claim['emr'] and claim['ai']) else "#ef4444"
             status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>" if border == "#10b981" else "<span style='color:#ef4444; font-weight:bold;'>FLAGGED: FRAUD RISK</span>"
             
+            # Generate the true cryptographic seal for UI
+            secure_hash = generate_poc_hash(claim['id'], claim['pin'], claim['room'], claim['action'], claim['time'])
+            
             st.markdown(f"""
             <div class='glass-card' style='border-left: 5px solid {border} !important;'>
                 <div style='display:flex; justify-content:space-between;'>
@@ -430,20 +444,19 @@ if nav == "COMPLIANCE" and user['level'] == "Admin":
                 </div>
                 <div style='color:#94a3b8; font-size:0.85rem; margin-top:5px; margin-bottom:10px;'>Operator PIN: {claim['pin']} | Timestamp: {claim['time']} | Claim ID: {claim['id']}</div>
                 <div>{ble_badge} {emr_badge} {ai_badge}</div>
+                <div class='hash-text'>🔒 SHA-256 SEAL: {secure_hash}</div>
             </div>
             """, unsafe_allow_html=True)
 
     with tab_proto:
         st.markdown("### Live Protocol & Policy Auditing")
         st.caption("Active monitoring of hospital clinical protocols. The AI engine intercepts and blocks unauthorized physician orders if the corresponding protocol is missing or unsigned.")
-        
         st.markdown("#### Respiratory Department")
         mock_protos = [
             {"title": "Standard Vent Management", "status": "ACTIVE", "signed": "2023-10-01"},
             {"title": "High Frequency Oscillation (HFOV)", "status": "MISSING/UNSIGNED", "signed": "N/A"},
             {"title": "BiPAP/NIPPV Titration", "status": "ACTIVE", "signed": "2024-01-15"}
         ]
-        
         for p in mock_protos:
             if p['status'] == "ACTIVE":
                 st.markdown(f"<div class='sched-row'><div style='flex-grow: 1;'><strong>{p['title']}</strong><br><span style='font-size:0.8rem; color:#94a3b8;'>Last Signed: {p['signed']}</span></div><div><span class='badge-pass'>COMPLIANT</span></div></div>", unsafe_allow_html=True)
@@ -452,15 +465,14 @@ if nav == "COMPLIANCE" and user['level'] == "Admin":
 
     with tab_comp:
         st.markdown("### Staff Competency Engine")
-        st.caption("Automated tracking of clinical competencies. Prevents non-compliant operators from being dispatched to high-acuity zones.")
-        
+        st.caption("Automated tracking of clinical competencies. Prevents non-compliant operators from claiming Urgent Shifts in high-acuity zones.")
         st.markdown("#### Critical Expirations (Action Required)")
         st.markdown("""
         <div class='glass-card' style='border-left: 5px solid #ef4444 !important;'>
             <strong style='color:#f8fafc; font-size:1.1rem;'>David Clark (Manager)</strong>
             <p style='color:#94a3b8; margin: 5px 0;'>Competency: <b>Advanced Ventilator Setup (Annual)</b></p>
             <span class='badge-fail'>45 DAYS OVERDUE</span>
-            <p style='color:#f87171; font-size:0.85rem; margin-top:10px;'>⚠️ AI Dispatcher has temporarily restricted this operator from claiming Vent Bounties until competency is logged.</p>
+            <p style='color:#f87171; font-size:0.85rem; margin-top:10px;'>⚠️ System has restricted this operator from claiming Vent Bounties until competency is verified.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -644,7 +656,7 @@ elif nav == "FINANCIAL FORECAST" and user['level'] == "Admin":
     base_outflow = sum((USERS.get(str(s[0]), {}).get('rate', 0.0) * 12) for s in scheds) if scheds else 0.0
     open_markets = run_query("SELECT rate FROM marketplace WHERE status='OPEN'")
     critical_outflow = sum((float(m[0]) * 12) for m in open_markets) if open_markets else 0.0
-    c1, c2, c3 = st.columns(3); c1.metric("Scheduled Baseline", f"${base_outflow:,.2f}"); c2.metric("Critical SOS Liability", f"${critical_outflow:,.2f}", delta_color="inverse"); c3.metric("Total Forecasted Outflow", f"${base_outflow + critical_outflow:,.2f}")
+    c1, c2, c3 = st.columns(3); c1.metric("Scheduled Baseline", f"${base_outflow:,.2f}"); c2.metric("Critical Liability", f"${critical_outflow:,.2f}", delta_color="inverse"); c3.metric("Total Forecasted Outflow", f"${base_outflow + critical_outflow:,.2f}")
     st.markdown("<br><hr style='border-color: rgba(255,255,255,0.1);'><br>", unsafe_allow_html=True)
     full_scheds = run_query("SELECT shift_id, pin, shift_date, shift_time, department FROM schedules WHERE status='SCHEDULED' ORDER BY shift_date ASC")
     if full_scheds:
@@ -677,17 +689,19 @@ elif nav == "CENSUS & ACUITY":
     
     if variance < 0:
         col3.metric("Current Staff", actual_staff, f"{variance} (Understaffed)", delta_color="inverse")
-        if st.button(f"🚨 BROADCAST SOS FOR {abs(variance)} STAFF"):
-            rate = user['rate'] * 1.5 if user['rate'] > 0 else 125.00
+        if st.button(f"🚨 BROADCAST URGENT SHIFT (Need {abs(variance)} Operators)"):
             
-            sos_text = f"CRITICAL CENSUS SURGE: {abs(variance)} operators needed in {user['dept']}. Claim in Marketplace."
+            # NO BOUNTY MULTIPLIER: Uses the user's standard rate as placeholder for the market post.
+            standard_rate = user['rate']
+            
+            sos_text = f"URGENT CENSUS SURGE: {abs(variance)} operators needed in {user['dept']}. Claim in Marketplace."
             run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": user['dept'], "m": sos_text})
             
             for i in range(abs(variance)):
-                new_shift_id = f"SOS-{int(time.time()*1000)}-{i}"
-                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 SOS: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": rate})
-                lock_escrow_bounty(new_shift_id, rate) 
-            st.success("🚨 SOS Dispatched to Enterprise Portal! Internal Bounties Locked."); time.sleep(2.5); st.rerun()
+                new_shift_id = f"URGENT-{int(time.time()*1000)}-{i}"
+                run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, :p, :r, :d, :s, :e, :rt, 'OPEN', 'PENDING')", {"id": new_shift_id, "p": pin, "r": f"🚨 URGENT: {user['dept']}", "d": str(date.today()), "s": "NOW", "e": "END OF SHIFT", "rt": standard_rate})
+                lock_escrow_bounty(new_shift_id, standard_rate) 
+            st.success("🚨 Urgent Shift Broadcasted! Base Rate Pay Validated."); time.sleep(2.5); st.rerun()
     else: 
         col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
     
@@ -733,16 +747,21 @@ elif nav == "MARKETPLACE":
     if open_shifts:
         for shift in open_shifts:
             s_id, s_role, s_date, s_time, s_rate, s_escrow = shift[0], shift[1], shift[2], shift[3], float(shift[4]), shift[5]
-            est_payout = s_rate * 12; escrow_badge = "<span style='background:#10b981; color:#0b1120; padding:3px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-left:10px;'>🔒 BUDGET SECURED</span>" if s_escrow == "LOCKED" else ""
-            st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f}</div></div></div></div>", unsafe_allow_html=True)
-            if st.button(f"⚡ CLAIM THIS SHIFT (${est_payout:,.0f})", key=f"claim_{s_id}"):
+            
+            # Displays the estimated payout for the base rate
+            est_payout = s_rate * 12; 
+            escrow_badge = "<span style='background:#10b981; color:#0b1120; padding:3px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-left:10px;'>✔️ BASE RATE VERIFIED</span>" if s_escrow == "LOCKED" else ""
+            
+            st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f} (Est. Base Pay)</div></div></div></div>", unsafe_allow_html=True)
+            
+            if st.button(f"⚡ CLAIM THIS SHIFT", key=f"claim_{s_id}"):
                 rows_updated = run_transaction("UPDATE marketplace SET status='CLAIMED', claimed_by=:p WHERE shift_id=:id AND status='OPEN'", {"p": pin, "id": s_id})
                 if rows_updated > 0:
                     run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) VALUES (:id, :p, :d, :t, :dept, 'SCHEDULED')", {"id": f"SCH-{s_id}", "p": pin, "d": s_date, "t": s_time, "dept": user['dept']})
                     st.success("✅ Shift Claimed!"); time.sleep(2); st.rerun()
                 else:
-                    st.error("❌ Shift Already Claimed! Another operator secured this bounty."); time.sleep(2); st.rerun()
-    else: st.markdown("<div class='empty-state'><h3>No Surge Bounties Active</h3></div>", unsafe_allow_html=True)
+                    st.error("❌ Shift Already Claimed! Another operator secured this shift."); time.sleep(2); st.rerun()
+    else: st.markdown("<div class='empty-state'><h3>No Urgent Coverage Needed</h3></div>", unsafe_allow_html=True)
 
 elif nav == "COMMS":
     st.markdown("## 📡 Secure Comms")
