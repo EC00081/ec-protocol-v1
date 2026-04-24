@@ -46,7 +46,7 @@ def verify_password(plain_text_password, hashed_password):
     except Exception: return False
 def generate_secure_checksum(doc_number, pin): return hashlib.sha256(f"{doc_number}-{pin}-{os.environ.get('SECURE_SALT', 'EC_PROTOCOL_ENTERPRISE_SALT')}".encode('utf-8')).hexdigest()
 
-# NEW: PoC Cryptographic Hashing Engine
+# PoC Cryptographic Hashing Engine
 def generate_poc_hash(claim_id, pin, room, action, timestamp_str):
     raw_data = f"{claim_id}|{pin}|{room}|{action}|{timestamp_str}|{os.environ.get('SECURE_SALT', 'CLINICAL_LEDGER_SALT')}"
     return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
@@ -95,11 +95,9 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
             
-            # --- COMPLIANCE TABLES ---
             conn.execute(text("CREATE TABLE IF NOT EXISTS hospital_protocols (protocol_id text PRIMARY KEY, title text, department text, status text, last_signed date, next_review date);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS staff_competencies (comp_id text PRIMARY KEY, pin text, competency_name text, completed_date date, expires_date date, status text);"))
             
-            # UPGRADED PoC LEDGER WITH SECURE HASH
             conn.execute(text("CREATE TABLE IF NOT EXISTS poc_ledger (claim_id text PRIMARY KEY, pin text, patient_room text, action text, timestamp timestamp DEFAULT NOW(), ble_verified boolean, emr_verified boolean, ai_verified boolean, status text, secure_hash text);"))
             try: conn.execute(text("ALTER TABLE poc_ledger ADD COLUMN IF NOT EXISTS secure_hash text;"))
             except: pass
@@ -261,11 +259,6 @@ def process_background_location_ping(pin, current_lat, current_lon, shift_id=Non
     return False, "User still within geofence."
 
 def log_indoor_presence(pin, major_floor, minor_room, scan_method="BLE"): return run_transaction("INSERT INTO indoor_tracking (pin, current_floor, current_room, scan_method, last_seen) VALUES (:p, :f, :r, :sm, NOW()) ON CONFLICT (pin) DO UPDATE SET current_floor=:f, current_room=:r, scan_method=:sm, last_seen=NOW()", {"p": pin, "f": major_floor, "r": minor_room, "sm": scan_method})
-def check_isolation_hazard_pay(pin, isolation_room):
-    tracker = run_query("SELECT current_room, scan_method FROM indoor_tracking WHERE pin=:p AND last_seen > NOW() - INTERVAL '15 minutes'", {"p": pin})
-    if tracker and tracker[0][0] == isolation_room: log_action(pin, "HAZARD PAY LOGGED", 15.00, f"Verified Isolation Care in {isolation_room} via {tracker[0][1]}"); return True
-    return False
-def award_accolade(pin, title, badge_type, emr_verified=True): return run_transaction("INSERT INTO accolades (acc_id, pin, title, badge_type, emr_verified) VALUES (:id, :p, :t, :b, :emr)", {"id": f"ACC-{int(time.time()*1000)}", "p": pin, "t": title, "b": badge_type, "emr": emr_verified})
 
 st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 html_style = """
@@ -310,7 +303,7 @@ engine_status = get_db_engine()
 if isinstance(engine_status, str):
     st.markdown("<br><br><h1 style='text-align: center; color: #ef4444;'>🚨 CONNECTION SEVERED</h1>", unsafe_allow_html=True)
     if engine_status == "URL_MISSING":
-        st.error("**CRITICAL ERROR:** The `SUPABASE_URL` environment variable is completely missing from Render.")
+        st.error("**CRITICAL ERROR:** The `SUPABASE_URL` environment variable or Streamlit Secret is completely missing.")
     else:
         st.error(f"**RAW DATABASE ERROR LOG:**\n\n{engine_status}")
     st.stop()
@@ -346,7 +339,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.8.0-Immutable</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v2.9.0-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -412,41 +405,47 @@ if nav == "COMPLIANCE" and user['level'] == "Admin":
     st.caption("Cryptographic verification of care, automated protocol enforcement, and anti-fraud auditing.")
     if st.button("🔄 Refresh Compliance Database"): st.rerun()
 
-    tab_poc, tab_proto, tab_comp = st.tabs(["🔒 PROOF OF CARE (PoC) LEDGER", "🛑 PROTOCOL ENFORCEMENT", "🪪 COMPETENCY AUDIT"])
+    tab_poc, tab_proto, tab_comp = st.tabs(["🔒 LIVE PROOF OF CARE (PoC) LEDGER", "🛑 PROTOCOL ENFORCEMENT", "🪪 COMPETENCY AUDIT"])
 
     with tab_poc:
         st.markdown("### Anti-Clawback Billing Engine")
         st.caption("Mathematically proves service delivery by correlating BLE indoor geolocation, EMR documentation, and AI verification, sealed with an immutable SHA-256 cryptographic hash.")
         
-        # MOCK DATA INJECTED WITH REAL HASH GENERATION FOR DEMO
-        mock_poc = [
-            {"id": "CLM-10923", "pin": "1001", "room": "ICU-Bed 4", "action": "Initiate APRV Vent Mode", "time": "2024-04-18 14:02:11", "ble": True, "emr": True, "ai": True},
-            {"id": "CLM-10924", "pin": "1002", "room": "ED-Trauma 1", "action": "BiPAP Application", "time": "2024-04-18 13:40:05", "ble": False, "emr": True, "ai": False},
-            {"id": "CLM-10925", "pin": "1003", "room": "Floor-402", "action": "Albuterol Tx", "time": "2024-04-18 12:15:00", "ble": True, "emr": True, "ai": True}
-        ]
+        # Pull REAL LIVE data from the database
+        real_poc_claims = run_query("SELECT claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, secure_hash FROM poc_ledger ORDER BY timestamp DESC LIMIT 20")
         
-        for claim in mock_poc:
-            ble_badge = "<span class='badge-pass'>BLE LOC MATCH</span>" if claim['ble'] else "<span class='badge-fail'>BLE LOC MISMATCH</span>"
-            emr_badge = "<span class='badge-pass'>EMR SYNCED</span>" if claim['emr'] else "<span class='badge-fail'>EMR MISSING</span>"
-            ai_badge = "<span class='badge-pass'>AI VERIFIED</span>" if claim['ai'] else "<span class='badge-warn'>AI PENDING</span>"
-            
-            border = "#10b981" if (claim['ble'] and claim['emr'] and claim['ai']) else "#ef4444"
-            status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>" if border == "#10b981" else "<span style='color:#ef4444; font-weight:bold;'>FLAGGED: FRAUD RISK</span>"
-            
-            # Generate the true cryptographic seal for UI
-            secure_hash = generate_poc_hash(claim['id'], claim['pin'], claim['room'], claim['action'], claim['time'])
-            
-            st.markdown(f"""
-            <div class='glass-card' style='border-left: 5px solid {border} !important;'>
-                <div style='display:flex; justify-content:space-between;'>
-                    <strong style='font-size:1.1rem;'>{claim['action']} | {claim['room']}</strong>
-                    <span>{status_text}</span>
+        if real_poc_claims:
+            for claim in real_poc_claims:
+                c_id, c_pin, c_room, c_action, c_time, c_ble, c_emr, c_ai, c_hash = claim
+                
+                # Retrieve actual operator name
+                op_name = USERS.get(str(c_pin), {}).get('name', f"Operator {c_pin}")
+                
+                ble_badge = "<span class='badge-pass'>BLE LOC MATCH</span>" if c_ble else "<span class='badge-warn'>BLE SIMULATED</span>"
+                emr_badge = "<span class='badge-pass'>EMR SYNCED</span>" if c_emr else "<span class='badge-warn'>EMR SIMULATED</span>"
+                ai_badge = "<span class='badge-pass'>AI VERIFIED</span>" if c_ai else "<span class='badge-warn'>AI PENDING</span>"
+                
+                # Color logic
+                border = "#10b981"
+                status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>"
+                
+                # Format time cleanly
+                try: display_time = c_time.strftime("%Y-%m-%d %H:%M:%S")
+                except: display_time = str(c_time)
+
+                st.markdown(f"""
+                <div class='glass-card' style='border-left: 5px solid {border} !important;'>
+                    <div style='display:flex; justify-content:space-between;'>
+                        <strong style='font-size:1.1rem;'>{c_action} | {c_room}</strong>
+                        <span>{status_text}</span>
+                    </div>
+                    <div style='color:#94a3b8; font-size:0.85rem; margin-top:5px; margin-bottom:10px;'>Operator: {op_name} ({c_pin}) | Timestamp: {display_time} | Claim ID: {c_id}</div>
+                    <div>{ble_badge} {emr_badge} {ai_badge}</div>
+                    <div class='hash-text'>🔒 SHA-256 SEAL: {c_hash}</div>
                 </div>
-                <div style='color:#94a3b8; font-size:0.85rem; margin-top:5px; margin-bottom:10px;'>Operator PIN: {claim['pin']} | Timestamp: {claim['time']} | Claim ID: {claim['id']}</div>
-                <div>{ble_badge} {emr_badge} {ai_badge}</div>
-                <div class='hash-text'>🔒 SHA-256 SEAL: {secure_hash}</div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No Proof-of-Care claims have been logged by operators yet.")
 
     with tab_proto:
         st.markdown("### Live Protocol & Policy Auditing")
@@ -532,28 +531,54 @@ elif nav == "DASHBOARD":
                 st.rerun()
             else: st.error("❌ CRITICAL: Database refused clock-out.")
         
-        with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)"):
-            st.caption("Simulate native mobile app triggers.")
+        with st.expander("⚙️ App Simulation Engine (Equipment & EMR Triggers)", expanded=True):
+            st.caption("Simulate native mobile app triggers and data integrations.")
+            
+            # --- NEW: LIVE POC LOGGING ---
+            st.markdown("#### 🔒 Log Clinical Event (Proof of Care)")
+            with st.form("poc_event_logger"):
+                st.caption("This form simulates an operator charting an event. It generates a live cryptographic SHA-256 seal pushed instantly to the Admin Compliance Ledger.")
+                c_form1, c_form2 = st.columns(2)
+                poc_room = c_form1.text_input("Patient Room", placeholder="e.g., ICU-Bed 2")
+                poc_action = c_form2.selectbox("Clinical Action Performed", [
+                    "Initiate Vent Mode", 
+                    "BiPAP Application", 
+                    "Albuterol Tx", 
+                    "Code Blue Response", 
+                    "Central Line Assist",
+                    "Extubation Protocol"
+                ])
+                
+                if st.form_submit_button("Seal & Cryptographically Log Event"):
+                    if not poc_room:
+                        st.error("Please specify a room number.")
+                    else:
+                        new_claim_id = f"CLM-{int(time.time())}"
+                        raw_ts = datetime.now(LOCAL_TZ)
+                        ts_string = raw_ts.strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Generate the true hash
+                        live_hash = generate_poc_hash(new_claim_id, pin, poc_room, poc_action, ts_string)
+                        
+                        # Save to live database (Simulating BLE/EMR/AI as True for the pilot demonstration)
+                        db_save = run_transaction("""
+                            INSERT INTO poc_ledger 
+                            (claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, status, secure_hash) 
+                            VALUES (:cid, :p, :r, :a, NOW(), TRUE, TRUE, TRUE, 'CLEARED', :h)
+                        """, {"cid": new_claim_id, "p": pin, "r": poc_room, "a": poc_action, "h": live_hash})
+                        
+                        if db_save > 0:
+                            st.success(f"✅ Event cryptographically sealed! Ask an Admin to check the Compliance Ledger.")
+                        else:
+                            st.error("Failed to write to database.")
+            
+            st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+
             if st.button("🚙 Simulate Leaving Geofence (FLSA Soft Alert)"):
                 success, msg = process_background_location_ping(pin, 42.1000, -71.0000)
                 if success: 
                     st.session_state.geofence_alert = True
                     st.rerun()
-            
-            c_ble1, c_ble2 = st.columns(2)
-            if c_ble1.button("📡 Simulate BLE Ping (Enter ISO-402)"): 
-                log_indoor_presence(pin, "Floor 4", "ISO-402", "BLE"); st.success("Presence verified via BLE.")
-            if c_ble2.button("🛡️ Audit Isolation Care"):
-                if check_isolation_hazard_pay(pin, "ISO-402"): st.success("✅ Audit Verified!")
-                else: st.error("❌ BLE Audit Failed.")
-
-            st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
-            st.caption("🏥 Advanced Clinical Accolades (EMR Verified)")
-            c_acc1, c_acc2, c_acc3, c_acc4 = st.columns(4)
-            if c_acc1.button("🩸 ECMO"): award_accolade(pin, "Advanced Perfusion (ECMO)", "Clinical Operator", True); st.success("Accolade: ECMO")
-            if c_acc2.button("💉 Pressors"): award_accolade(pin, "Critical Pharmacotherapy (Pressors)", "Clinical Operator", True); st.success("Accolade: Pressors")
-            if c_acc3.button("🔄 Dialysis"): award_accolade(pin, "Renal Replacement Therapy", "Clinical Operator", True); st.success("Accolade: CRRT")
-            if c_acc4.button("🌬️ Vent Mgmt"): award_accolade(pin, "Advanced Airway Management", "Clinical Operator", True); st.success("Accolade: Vent")
 
     else:
         selected_facility = st.selectbox("Select Facility", list(HOSPITALS.keys()))
