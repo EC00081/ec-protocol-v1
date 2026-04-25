@@ -69,7 +69,7 @@ def get_db_engine():
             conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN IF NOT EXISTS last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
             
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
-            if True:
+            if True: # Set to True to force the injection of the new Director accounts
                 seed_data = [
                     ("1001", "liam@ecprotocol.com", hash_password("password123"), "Liam O'Neil", "RRT", "Respiratory", "Worker", 120.00, "+15551234567"),
                     ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 50.00, None),
@@ -81,7 +81,10 @@ def get_db_engine():
                     ("9003", "cno@ecprotocol.com", hash_password("password123"), "CNO View", "CNO", "Executive", "Admin", 0.00, None),
                     ("9004", "cco@ecprotocol.com", hash_password("password123"), "CCO View", "CCO", "Executive", "Admin", 0.00, None),
                     ("9005", "cto@ecprotocol.com", hash_password("password123"), "CTO View", "CTO", "Executive", "Admin", 0.00, None),
-                    ("9006", "cfo@ecprotocol.com", hash_password("password123"), "CFO View", "CFO", "Executive", "Admin", 0.00, None)
+                    ("9006", "cfo@ecprotocol.com", hash_password("password123"), "CFO View", "CFO", "Executive", "Admin", 0.00, None),
+                    # Sub-Specialty Directors
+                    ("8001", "resp_dir@ecprotocol.com", hash_password("password123"), "Alice Wright", "Director", "Respiratory", "Director", 100.00, None),
+                    ("8002", "nursing_dir@ecprotocol.com", hash_password("password123"), "Marcus Cole", "Director", "Nursing", "Director", 100.00, None)
                 ]
                 for sd in seed_data: conn.execute(text("INSERT INTO enterprise_users (pin, email, password_hash, name, role, dept, access_level, hourly_rate, phone, last_pw_change) VALUES (:p, :e, :pw, :n, :r, :d, :al, :hr, :ph, NOW() - INTERVAL '100 days') ON CONFLICT DO NOTHING"), {"p": sd[0], "e": sd[1], "pw": sd[2], "n": sd[3], "r": sd[4], "d": sd[5], "al": sd[6], "hr": sd[7], "ph": sd[8]})
             
@@ -346,7 +349,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v3.0.0-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v3.1.0-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -404,7 +407,7 @@ elif user['role'] == "COO":
 elif user['role'] == "CNO":
     menu_items = ["CENSUS & ACUITY", "COMPLIANCE", "SCHEDULE", "APPROVALS", "COMMS"]
 elif user['role'] == "CCO":
-    menu_items = ["COMPLIANCE", "APPROVALS", "COMMS"]
+    menu_items = ["COMPLIANCE", "COMMS"] # Removed APPROVALS
 elif user['role'] == "CTO":
     menu_items = ["COMMAND CENTER", "MY PROFILE", "COMMS"]
 elif user['role'] == "CFO":
@@ -412,7 +415,7 @@ elif user['role'] == "CFO":
 elif user['level'] == "Admin": 
     menu_items = ["COMMAND CENTER", "COMPLIANCE", "FINANCIAL FORECAST", "APPROVALS", "COMMS"]
 elif user['level'] in ["Manager", "Director", "Supervisor"]: 
-    menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "COMMS", "MY PROFILE"]
+    menu_items = ["DASHBOARD", "CENSUS & ACUITY", "MARKETPLACE", "SCHEDULE", "THE BANK", "APPROVALS", "COMPLIANCE", "COMMS", "MY PROFILE"]
 else: 
     menu_items = ["DASHBOARD", "MARKETPLACE", "SCHEDULE", "THE BANK", "COMMS", "MY PROFILE"]
 
@@ -421,7 +424,7 @@ nav = st.radio("NAVIGATION", menu_items, horizontal=True, label_visibility="coll
 st.markdown("<hr style='border-color: rgba(255,255,255,0.05); margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 🛡️ ENTERPRISE COMPLIANCE & AUDIT SHIELD (CCO VIEW)
+# 🛡️ ENTERPRISE COMPLIANCE & AUDIT SHIELD
 # ---------------------------------------------------------
 if nav == "COMPLIANCE":
     st.markdown("## 🛡️ Enterprise Compliance Engine")
@@ -467,59 +470,88 @@ if nav == "COMPLIANCE":
 
     with tab_proto:
         st.markdown("### 🛑 Protocol & Policy Command")
-        st.caption("Central hub for the Chief Compliance Officer to audit, approve, and broadcast hospital-wide policies.")
         
-        c_sub1, c_sub2 = st.tabs(["⚠️ ACTION REQUIRED", "📝 DRAFT & APPROVALS"])
-        
-        with c_sub1:
-            st.markdown("#### Expiring or Missing Protocols")
-            alerts = run_query("SELECT protocol_id, title, department, next_review FROM hospital_protocols WHERE status='ACTIVE' AND next_review <= NOW() + INTERVAL '30 days' OR status='MISSING'")
+        # --- CCO / ADMIN VIEW ---
+        if user['role'] == "CCO" or user['level'] == "Admin":
+            st.caption("Central hub for the Chief Compliance Officer to audit, approve, and broadcast hospital-wide policies.")
+            c_sub1, c_sub2 = st.tabs(["⚠️ ACTION REQUIRED", "📝 DRAFT & APPROVALS"])
             
-            if alerts:
-                for a in alerts:
-                    p_id, p_title, p_dept, p_exp = a
-                    st.markdown(f"""
-                    <div class='glass-card' style='border-left: 5px solid #ef4444 !important;'>
-                        <div style='display:flex; justify-content:space-between;'>
-                            <strong style='color:#f8fafc; font-size:1.1rem;'>{p_title} ({p_dept})</strong>
-                            <span class='badge-fail'>EXPIRES SOON / MISSING</span>
-                        </div>
-                        <p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Deadline: {p_exp}</p>
-                        <button style='background:rgba(239,68,68,0.2); border:1px solid #ef4444; color:#fff; padding:5px 10px; border-radius:5px;'>Assign for Review</button>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.success("✅ All active protocols are up to date.")
-
-        with c_sub2:
-            st.markdown("#### Pending CCO Approvals")
-            drafts = run_query("SELECT protocol_id, title, department, author_pin FROM hospital_protocols WHERE status='PENDING_CCO'")
-            if drafts:
-                for d in drafts:
-                    d_id, d_title, d_dept, d_author = d
-                    author_name = USERS.get(str(d_author), {}).get('name', 'Unknown')
-                    st.markdown(f"<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><strong>{d_title}</strong><br><span style='font-size:0.8rem; color:#94a3b8;'>Drafted by: {author_name} | Target: {d_dept}</span></div>", unsafe_allow_html=True)
-                    
-                    c_btn1, c_btn2 = st.columns(2)
-                    if c_btn1.button("✅ APPROVE & BROADCAST", key=f"app_{d_id}"):
-                        run_transaction("UPDATE hospital_protocols SET status='ACTIVE', last_signed=NOW(), next_review=NOW() + INTERVAL '1 year' WHERE protocol_id=:id", {"id": d_id})
-                        msg_text = f"📢 NEW PROTOCOL ACTIVE: {d_title}. All {d_dept} staff must review immediately."
-                        run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :dept, :m, FALSE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "dept": "All", "m": msg_text})
-                        st.success("Protocol Published and Broadcasted!"); time.sleep(2); st.rerun()
-                    if c_btn2.button("❌ REJECT", key=f"rej_{d_id}"):
-                        run_transaction("UPDATE hospital_protocols SET status='REJECTED' WHERE protocol_id=:id", {"id": d_id})
-                        st.rerun()
-            else:
-                st.info("No protocol drafts awaiting your approval.")
+            with c_sub1:
+                st.markdown("#### Expiring or Missing Protocols")
+                alerts = run_query("SELECT protocol_id, title, department, next_review FROM hospital_protocols WHERE status='ACTIVE' AND next_review <= NOW() + INTERVAL '30 days' OR status='MISSING'")
                 
-            with st.expander("➕ Submit New Protocol Draft"):
-                with st.form("new_protocol"):
+                if alerts:
+                    for a in alerts:
+                        p_id, p_title, p_dept, p_exp = a
+                        st.markdown(f"""
+                        <div class='glass-card' style='border-left: 5px solid #ef4444 !important;'>
+                            <div style='display:flex; justify-content:space-between;'>
+                                <strong style='color:#f8fafc; font-size:1.1rem;'>{p_title} ({p_dept})</strong>
+                                <span class='badge-fail'>EXPIRES SOON / MISSING</span>
+                            </div>
+                            <p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Deadline: {p_exp}</p>
+                            <button style='background:rgba(239,68,68,0.2); border:1px solid #ef4444; color:#fff; padding:5px 10px; border-radius:5px;'>Assign for Review</button>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.success("✅ All active protocols are up to date.")
+
+            with c_sub2:
+                st.markdown("#### Pending CCO Approvals")
+                drafts = run_query("SELECT protocol_id, title, department, author_pin FROM hospital_protocols WHERE status='PENDING_CCO'")
+                if drafts:
+                    for d in drafts:
+                        d_id, d_title, d_dept, d_author = d
+                        author_name = USERS.get(str(d_author), {}).get('name', 'Unknown')
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid #f59e0b !important;'><strong>{d_title}</strong><br><span style='font-size:0.8rem; color:#94a3b8;'>Drafted by: {author_name} | Target: {d_dept}</span></div>", unsafe_allow_html=True)
+                        
+                        c_btn1, c_btn2 = st.columns(2)
+                        if c_btn1.button("✅ APPROVE & BROADCAST", key=f"app_{d_id}"):
+                            run_transaction("UPDATE hospital_protocols SET status='ACTIVE', last_signed=NOW(), next_review=NOW() + INTERVAL '1 year' WHERE protocol_id=:id", {"id": d_id})
+                            msg_text = f"📢 NEW PROTOCOL ACTIVE: {d_title}. All {d_dept} staff must review immediately."
+                            run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :dept, :m, FALSE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "dept": "All", "m": msg_text})
+                            st.success("Protocol Published and Broadcasted!"); time.sleep(2); st.rerun()
+                        if c_btn2.button("❌ REJECT", key=f"rej_{d_id}"):
+                            run_transaction("UPDATE hospital_protocols SET status='REJECTED' WHERE protocol_id=:id", {"id": d_id})
+                            st.rerun()
+                else:
+                    st.info("No protocol drafts awaiting your approval.")
+                    
+        # --- SUB-SPECIALTY DIRECTOR VIEW ---
+        elif user['level'] in ["Director", "Manager", "Supervisor"]:
+            st.caption(f"Departmental Protocol Hub: {user['dept']}")
+            c_sub1, c_sub2 = st.tabs(["📄 ACTIVE PROTOCOLS", "➕ SUBMIT DRAFT"])
+            
+            with c_sub1:
+                st.markdown(f"#### Active {user['dept']} Protocols")
+                active_p = run_query("SELECT title, next_review FROM hospital_protocols WHERE status='ACTIVE' AND (department=:d OR department='All')", {"d": user['dept']})
+                if active_p:
+                    for p in active_p:
+                        st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><strong>{p[0]}</strong><br><span style='color:#94a3b8; font-size:0.85rem;'>Next Review: {p[1]}</span></div>", unsafe_allow_html=True)
+                else:
+                    st.info("No active protocols found.")
+                    
+            with c_sub2:
+                st.markdown("#### Submit New Protocol for CCO Review")
+                with st.form("new_protocol_dir"):
                     new_title = st.text_input("Protocol Title")
-                    new_dept = st.selectbox("Target Department", ["All", "Respiratory", "ICU", "Emergency", "Nursing"])
+                    new_dept = st.selectbox("Target Department", [user['dept'], "All"])
                     if st.form_submit_button("Submit for CCO Review"):
                         run_transaction("INSERT INTO hospital_protocols (protocol_id, title, department, status, author_pin) VALUES (:id, :t, :d, 'PENDING_CCO', :p)", {"id": f"PRO-{int(time.time())}", "t": new_title, "d": new_dept, "p": pin})
                         st.success("Draft submitted to Compliance.")
                         time.sleep(1.5); st.rerun()
+                        
+                st.markdown("#### My Pending Drafts")
+                drafts = run_query("SELECT title, status FROM hospital_protocols WHERE author_pin=:p", {"p": pin})
+                if drafts:
+                    for d in drafts:
+                        color = "#f59e0b" if d[1] == 'PENDING_CCO' else "#ef4444" if d[1] == 'REJECTED' else "#10b981"
+                        st.markdown(f"<div style='border-left: 3px solid {color}; padding-left: 10px; margin-bottom:5px; color:#f8fafc;'>{d[0]} - <span style='color:{color}; font-weight:bold;'>{d[1]}</span></div>", unsafe_allow_html=True)
+                else:
+                    st.info("You have no pending protocol drafts.")
+        
+        else:
+            st.info("You do not have authorization to manage protocols.")
 
     with tab_comp:
         st.markdown("### Staff Competency Engine")
