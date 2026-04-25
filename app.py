@@ -69,7 +69,7 @@ def get_db_engine():
             conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN IF NOT EXISTS last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
             
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
-            if res[0] == 0:
+            if True:
                 seed_data = [
                     ("1001", "liam@ecprotocol.com", hash_password("password123"), "Liam O'Neil", "RRT", "Respiratory", "Worker", 120.00, "+15551234567"),
                     ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 50.00, None),
