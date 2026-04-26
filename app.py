@@ -69,7 +69,7 @@ def get_db_engine():
             conn.execute(text("ALTER TABLE enterprise_users ADD COLUMN IF NOT EXISTS last_pw_change TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"))
             
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
-            if True: # Always runs to inject new C-suite if missing
+            if True: 
                 seed_data = [
                     ("1001", "liam@ecprotocol.com", hash_password("password123"), "Liam O'Neil", "RRT", "Respiratory", "Worker", 120.00, "+15551234567"),
                     ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 50.00, None),
@@ -92,7 +92,6 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS shift_bids (bid_id text PRIMARY KEY, shift_id text, pin text, counter_rate numeric, status text DEFAULT 'PENDING', timestamp timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
@@ -308,7 +307,7 @@ html_style = """
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(16, 185, 129, 0.3); border-left: 5px solid #10b981; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
     .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(16, 185, 129, 0.6); }
-    .bounty-card::before { content: 'URGENT COVERAGE'; position: absolute; top: 18px; right: -35px; background: #10b981; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
+    .bounty-card::before { content: 'OPEN COVERAGE'; position: absolute; top: 18px; right: -35px; background: #10b981; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #f8fafc; margin: 10px 0; letter-spacing: -1px; }
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
@@ -368,7 +367,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v4.0.0-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v4.1.0-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -599,7 +598,7 @@ elif nav == "COMPLIANCE":
 
     with tab_comp:
         st.markdown("### Staff Competency Engine")
-        st.caption("Automated tracking of clinical competencies. Prevents non-compliant operators from claiming Urgent Shifts in high-acuity zones.")
+        st.caption("Automated tracking of clinical competencies. Prevents non-compliant operators from claiming shifts in high-acuity zones.")
         st.markdown("#### Critical Expirations (Action Required)")
         st.markdown("""
         <div class='glass-card' style='border-left: 5px solid #ef4444 !important;'>
@@ -886,25 +885,6 @@ elif nav == "MARKETPLACE":
     st.markdown("<h2 style='font-weight:900; margin-bottom:5px;'>⚡ INTERNAL SHIFT MARKETPLACE</h2>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Market"): st.rerun()
     
-    # MANAGER VIEW: Counter-Bidding Approval Queue
-    if user['level'] in ["Admin", "Executive", "Manager", "Director", "Supervisor"]:
-        bids = run_query("SELECT b.bid_id, b.shift_id, b.pin, b.counter_rate, m.role, m.date FROM shift_bids b JOIN marketplace m ON b.shift_id = m.shift_id WHERE b.status='PENDING'")
-        if bids:
-            with st.expander("⚖️ REVIEW PENDING SHIFT BIDS", expanded=True):
-                for b in bids:
-                    b_id, b_sid, b_pin, b_rate, m_role, m_date = b
-                    op_name = USERS.get(str(b_pin), {}).get('name', 'Unknown')
-                    st.markdown(f"<div style='background:rgba(30,41,59,0.8); border-left:4px solid #3b82f6; padding:10px; margin-bottom:10px;'><strong>{op_name}</strong> submitted a counter-offer of <strong style='color:#34d399;'>${float(b_rate):.2f}/hr</strong> for the <strong>{m_date}</strong> {m_role} shift.</div>", unsafe_allow_html=True)
-                    c_btn1, c_btn2 = st.columns(2)
-                    if c_btn1.button("✅ APPROVE BID", key=f"app_bid_{b_id}"):
-                        run_transaction("UPDATE marketplace SET rate=:r, status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"r": b_rate, "p": b_pin, "id": b_sid})
-                        run_transaction("UPDATE shift_bids SET status='APPROVED' WHERE bid_id=:id", {"id": b_id})
-                        run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) SELECT shift_id, :p, date, start_time, 'Assigned via Bid', 'SCHEDULED' FROM marketplace WHERE shift_id=:id", {"p": b_pin, "id": b_sid})
-                        st.success("Bid Approved! Shift Assigned."); time.sleep(1.5); st.rerun()
-                    if c_btn2.button("❌ REJECT", key=f"rej_bid_{b_id}"):
-                        run_transaction("UPDATE shift_bids SET status='REJECTED' WHERE bid_id=:id", {"id": b_id}); st.rerun()
-                        
-    # FLOOR VIEW: Marketplace Feed
     open_shifts = run_query("SELECT shift_id, role, date, start_time, rate, escrow_status FROM marketplace WHERE status='OPEN' ORDER BY date ASC")
     if open_shifts:
         for shift in open_shifts:
@@ -914,8 +894,7 @@ elif nav == "MARKETPLACE":
             
             st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f} (Est. Base Pay)</div></div></div></div>", unsafe_allow_html=True)
             
-            c_claim, c_bid = st.columns(2)
-            if c_claim.button(f"⚡ CLAIM ({s_rate}/hr)", key=f"claim_{s_id}"):
+            if st.button(f"⚡ CLAIM ({s_rate}/hr)", key=f"claim_{s_id}"):
                 # EMR INTERLOCK CHECK
                 creds = run_query("SELECT doc_type, exp_date FROM credentials WHERE pin=:p AND status='ACTIVE'", {"p": pin})
                 expired = [c[0] for c in creds if str(c[1]) < str(date.today())]
@@ -928,13 +907,6 @@ elif nav == "MARKETPLACE":
                         st.success("✅ Shift Claimed!"); time.sleep(2); st.rerun()
                     else:
                         st.error("❌ Shift Already Claimed!"); time.sleep(2); st.rerun()
-                        
-            with c_bid.expander("⚖️ Counter-Offer Rate"):
-                with st.form(f"bid_form_{s_id}"):
-                    counter_val = st.number_input("Your Required Rate ($/hr)", min_value=s_rate, value=s_rate+15.0)
-                    if st.form_submit_button("Submit Bid to Manager"):
-                        run_transaction("INSERT INTO shift_bids (bid_id, shift_id, pin, counter_rate) VALUES (:bid, :sid, :p, :r)", {"bid": f"BID-{int(time.time()*1000)}", "sid": s_id, "p": pin, "r": counter_val})
-                        st.success("Bid transmitted. Awaiting manager approval."); time.sleep(1.5); st.rerun()
     else: st.markdown("<div class='empty-state'><h3>No Urgent Coverage Needed</h3></div>", unsafe_allow_html=True)
 
 elif nav == "COMMS":
@@ -968,14 +940,14 @@ elif nav == "SCHEDULE":
                 if s[3] == 'SCHEDULED':
                     st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='font-size:1.1rem; font-weight:700; color:#f8fafc;'>{s[1]} <span style='color:#34d399;'>| {s[2]}</span></div></div>", unsafe_allow_html=True)
                     col1, col2 = st.columns(2)
-                    if col1.button("🚨 CALL OUT SICK (Auto-Surge)", key=f"co_{s[0]}"): 
+                    if col1.button("🚨 CALL OUT SICK (Auto-Replace)", key=f"co_{s[0]}"): 
                         run_transaction("UPDATE schedules SET status='CALL_OUT' WHERE shift_id=:id", {"id": s[0]})
-                        # --- AUTO-SURGE TRIGGER LOGIC ---
-                        surge_rate = user['rate'] + 20.0
-                        new_sid = f"SURGE-{s[0]}"
-                        run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 SURGE REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": surge_rate})
-                        run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": "All", "m": f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Base rate surged to ${surge_rate}/hr in Marketplace."})
-                        st.success("Sick call registered. Auto-Surge logic has pushed an emergency replacement bounty to the fleet."); time.sleep(2.5); st.rerun()
+                        # --- FLAT RATE AUTO-REPLACE LOGIC ---
+                        standard_rate = user['rate']
+                        new_sid = f"REPLACE-{s[0]}"
+                        run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 URGENT REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": standard_rate})
+                        run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."})
+                        st.success("Sick call registered. Automated replacement bounty pushed to the department."); time.sleep(2.5); st.rerun()
                 elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE LOGGED)")
         else: st.info("Your schedule is clear.")
 
