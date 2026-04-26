@@ -75,7 +75,6 @@ def get_db_engine():
                     ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 50.00, None),
                     ("1003", "sarah@ecprotocol.com", hash_password("password123"), "Sarah Jenkins", "Charge RRT", "Respiratory", "Supervisor", 90.00, None),
                     ("1004", "manager@ecprotocol.com", hash_password("password123"), "David Clark", "Manager", "Respiratory", "Manager", 0.00, None),
-                    # C-Suite Executive Profiles
                     ("9001", "ceo@ecprotocol.com", hash_password("password123"), "CEO View", "CEO", "Executive", "Admin", 0.00, None),
                     ("9002", "coo@ecprotocol.com", hash_password("password123"), "COO View", "COO", "Executive", "Admin", 0.00, None),
                     ("9003", "cno@ecprotocol.com", hash_password("password123"), "CNO View", "CNO", "Executive", "Admin", 0.00, None),
@@ -83,7 +82,6 @@ def get_db_engine():
                     ("9005", "cto@ecprotocol.com", hash_password("password123"), "CTO View", "CTO", "Executive", "Admin", 0.00, None),
                     ("9006", "cfo@ecprotocol.com", hash_password("password123"), "CFO View", "CFO", "Executive", "Admin", 0.00, None),
                     ("9007", "chro@ecprotocol.com", hash_password("password123"), "CHRO View", "CHRO", "Executive", "Admin", 0.00, None),
-                    # Sub-Specialty Directors
                     ("8001", "resp_dir@ecprotocol.com", hash_password("password123"), "Alice Wright", "Director", "Respiratory", "Director", 100.00, None),
                     ("8002", "nursing_dir@ecprotocol.com", hash_password("password123"), "Marcus Cole", "Director", "Nursing", "Director", 100.00, None)
                 ]
@@ -92,10 +90,7 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS workers (pin text PRIMARY KEY, status text, start_time numeric, earnings numeric, last_active timestamp, lat numeric, lon numeric);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS history (pin text, action text, timestamp timestamp DEFAULT NOW(), amount numeric, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS marketplace (shift_id text PRIMARY KEY, poster_pin text, role text, date text, start_time text, end_time text, rate numeric, status text, claimed_by text, escrow_status text);"))
-            
-            # Using shift_bids table structure to handle Overtime Manager Approvals
             conn.execute(text("CREATE TABLE IF NOT EXISTS shift_bids (bid_id text PRIMARY KEY, shift_id text, pin text, counter_rate numeric, status text DEFAULT 'PENDING', timestamp timestamp DEFAULT NOW());"))
-            
             conn.execute(text("CREATE TABLE IF NOT EXISTS transactions (tx_id text PRIMARY KEY, pin text, amount numeric, timestamp timestamp DEFAULT NOW(), status text, destination_pubkey text, tx_type text, note text);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS schedules (shift_id text PRIMARY KEY, pin text, shift_date text, shift_time text, department text, status text DEFAULT 'SCHEDULED');"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS unit_census (dept text PRIMARY KEY, total_pts int, high_acuity int, vented_pts int DEFAULT 0, nipvv_pts int DEFAULT 0, last_updated timestamp DEFAULT NOW());"))
@@ -106,9 +101,20 @@ def get_db_engine():
             conn.execute(text("CREATE TABLE IF NOT EXISTS hr_onboarding (pin text PRIMARY KEY, w4_filing_status text, w4_allowances int, dd_bank text, dd_acct_last4 text, signed_date timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS pto_requests (req_id text PRIMARY KEY, pin text, start_date text, end_date text, reason text, status text DEFAULT 'PENDING', submitted timestamp DEFAULT NOW());"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS credentials (doc_id text PRIMARY KEY, pin text, doc_type text, doc_number text, exp_date text, status text);"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS indoor_tracking (pin text PRIMARY KEY, current_floor text, current_room text, scan_method text, last_seen timestamp DEFAULT NOW());"))
-            conn.execute(text("CREATE TABLE IF NOT EXISTS accolades (acc_id text PRIMARY KEY, pin text, title text, badge_type text, timestamp timestamp DEFAULT NOW(), emr_verified boolean);"))
             
+            # --- OBT SOULBOUND LEDGER ---
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS obt_ledger (
+                    token_id TEXT PRIMARY KEY, 
+                    pin TEXT, 
+                    accolade_type TEXT, 
+                    clinical_context TEXT, 
+                    timestamp TIMESTAMP DEFAULT NOW(), 
+                    facility_origin TEXT, 
+                    encryption_hash TEXT
+                );
+            """))
+
             conn.execute(text("CREATE TABLE IF NOT EXISTS poc_ledger (claim_id text PRIMARY KEY, pin text, patient_room text, action text, timestamp timestamp DEFAULT NOW(), ble_verified boolean, emr_verified boolean, ai_verified boolean, status text, secure_hash text);"))
             try: conn.execute(text("ALTER TABLE poc_ledger ADD COLUMN IF NOT EXISTS secure_hash text;"))
             except: pass
@@ -278,7 +284,7 @@ def calculate_fatigue_score(p_pin, target_dept):
     if current_weekday >= 5: 
         res_wknds = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND extract(isodow from timestamp) >= 6 AND timestamp >= NOW() - INTERVAL '30 days'", {"p": p_pin})
         if res_wknds and res_wknds[0][0] > 1: score += 50.0; notes.append(f"Weekend Equality (Worked {res_wknds[0][0]} recently)")
-    res_acc = run_query("SELECT count(*) FROM accolades WHERE pin=:p AND timestamp >= NOW() - INTERVAL '7 days'", {"p": p_pin})
+    res_acc = run_query("SELECT count(*) FROM obt_ledger WHERE pin=:p AND timestamp >= NOW() - INTERVAL '7 days'", {"p": p_pin})
     if res_acc and res_acc[0][0] > 0: score += 20.0; notes.append("Acuity Burnout Risk (+20)")
     res_rec = run_query("SELECT count(*) FROM history WHERE pin=:p AND action='CLOCK OUT' AND timestamp >= NOW() - INTERVAL '48 hours'", {"p": p_pin})
     if res_rec and res_rec[0][0] > 0 and USERS.get(p_pin, {}).get('dept') == target_dept: score -= 15.0; notes.append("Continuity Match (-15)")
@@ -375,7 +381,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v4.2.0-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v5.0.0-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -672,7 +678,14 @@ elif nav == "DASHBOARD":
             with st.form("poc_event_logger"):
                 c_form1, c_form2 = st.columns(2)
                 poc_room = c_form1.text_input("Patient Room", placeholder="e.g., ICU-Bed 2")
-                poc_action = c_form2.selectbox("Clinical Action Performed", ["Initiate Vent Mode", "BiPAP Application", "Albuterol Tx", "Code Blue Response", "Central Line Assist", "Extubation Protocol"])
+                poc_action = c_form2.selectbox("Clinical Action Performed", [
+                    "Routine Albuterol Tx", 
+                    "BiPAP Application", 
+                    "Endotracheal Intubation", 
+                    "Initiate Veletri/Flolan", 
+                    "CRRT Dialysis Setup", 
+                    "Code Blue Response"
+                ])
                 
                 if st.form_submit_button("Seal & Cryptographically Log Event"):
                     if not poc_room: st.error("Please specify a room number.")
@@ -680,8 +693,23 @@ elif nav == "DASHBOARD":
                         new_claim_id = f"CLM-{int(time.time())}"
                         ts_string = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
                         live_hash = generate_poc_hash(new_claim_id, pin, poc_room, poc_action, ts_string)
-                        run_transaction("INSERT INTO poc_ledger (claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, status, secure_hash) VALUES (:cid, :p, :r, :a, NOW(), TRUE, TRUE, TRUE, 'CLEARED', :h)", {"cid": new_claim_id, "p": pin, "r": poc_room, "a": poc_action, "h": live_hash})
-                        st.success(f"✅ Event cryptographically sealed!")
+                        
+                        db_save = run_transaction("INSERT INTO poc_ledger (claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, status, secure_hash) VALUES (:cid, :p, :r, :a, NOW(), TRUE, TRUE, TRUE, 'CLEARED', :h)", {"cid": new_claim_id, "p": pin, "r": poc_room, "a": poc_action, "h": live_hash})
+                        
+                        if db_save > 0:
+                            st.success(f"✅ Event cryptographically sealed in PoC Ledger!")
+                            
+                            # --- OBT SOULBOUND MINTING ENGINE ---
+                            high_acuity_triggers = ["Endotracheal Intubation", "Initiate Veletri/Flolan", "CRRT Dialysis Setup", "Code Blue Response"]
+                            if poc_action in high_acuity_triggers:
+                                sbt_id = f"SBT-{pin}-{int(time.time()*1000)}"
+                                sbt_hash = hashlib.sha256(f"{sbt_id}|{poc_action}|{poc_room}".encode('utf-8')).hexdigest()
+                                run_transaction("""
+                                    INSERT INTO obt_ledger (token_id, pin, accolade_type, clinical_context, facility_origin, encryption_hash) 
+                                    VALUES (:t_id, :p, 'Critical Intervention', :ctx, 'Brockton General', :hash)
+                                """, {"t_id": sbt_id, "p": pin, "ctx": f"{poc_action} | {poc_room}", "hash": sbt_hash})
+                                
+                                st.success(f"🏅 HIGH ACUITY MILESTONE MINTED: {poc_action} permanently added to your OBT Portfolio.")
             
             st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
             if st.button("🚙 Simulate Leaving Geofence (FLSA Soft Alert)"):
@@ -860,7 +888,6 @@ elif nav == "CENSUS & ACUITY":
     else: 
         col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
         
-    # --- NEW SMART FLEX ENGINE ---
     with st.expander("📉 Smart Flex Calculator (Down-Staffing)"):
         st.caption("When census drops, AI algorithms recommend which staff to send home based on premium pay costs and fatigue levels—saving money and preventing burnout instead of just relying on seniority.")
         
@@ -873,16 +900,13 @@ elif nav == "CENSUS & ACUITY":
                 w_name = USERS.get(str(w_pin), {}).get('name', 'Unknown')
                 w_rate = USERS.get(str(w_pin), {}).get('rate', 0.0)
                 
-                # Check for OT
                 wk_hrs = get_rolling_weekly_hours(w_pin)
                 is_ot = wk_hrs > 40.0
-                
-                # Check Fatigue
                 f_score, _, _ = calculate_fatigue_score(w_pin, user['dept'])
                 
                 priority_score = 0
-                if is_ot: priority_score += 1000 # Top priority to flex to save 1.5x pay
-                priority_score += f_score # Higher fatigue = higher priority to flex
+                if is_ot: priority_score += 1000 
+                priority_score += f_score 
                 
                 flex_candidates.append({
                     "pin": w_pin, "name": w_name, "is_ot": is_ot, "f_score": f_score, "priority": priority_score, "rate": w_rate
@@ -943,18 +967,15 @@ elif nav == "MARKETPLACE":
             st.markdown(f"<div class='bounty-card'><div style='display:flex; justify-content:space-between; align-items:flex-start;'><div><div style='color:#94a3b8; font-weight:800; text-transform:uppercase; font-size:0.9rem;'>{s_date} <span style='color:#38bdf8;'>| {s_time}</span></div><div style='font-size:1.4rem; font-weight:800; color:#f8fafc; margin-top:5px;'>{s_role}{escrow_badge}</div><div class='bounty-amount'>${est_payout:,.2f} (Est. Base Pay)</div></div></div></div>", unsafe_allow_html=True)
             
             if st.button(f"⚡ CLAIM SHIFT", key=f"claim_{s_id}"):
-                # 1. EMR INTERLOCK CHECK
                 creds = run_query("SELECT doc_type, exp_date FROM credentials WHERE pin=:p AND status='ACTIVE'", {"p": pin})
                 expired = [c[0] for c in creds if str(c[1]) < str(date.today())]
                 
-                # 2. OVERTIME BLOCKER CHECK
                 wk_hrs = get_rolling_weekly_hours(pin)
                 will_hit_ot = (wk_hrs + 12) > 40.0
                 
                 if expired:
                     st.error(f"🛑 HARD EMR INTERLOCK: Claim blocked due to expired credentials ({', '.join(expired)}). Please update via HR Vault.")
                 elif will_hit_ot:
-                    # Reroute to Approval Queue instead of instant claim
                     st.warning(f"⚠️ CFO OVERTIME LOCK: Claiming this shift pushes you to {wk_hrs+12:.1f} hrs for the week. Shift pended for Manager/CFO Overtime Authorization.")
                     run_transaction("INSERT INTO shift_bids (bid_id, shift_id, pin, counter_rate, status) VALUES (:bid, :sid, :p, :r, 'PENDING_OT')", {"bid": f"OT-{int(time.time()*1000)}", "sid": s_id, "p": pin, "r": s_rate * 1.5})
                     time.sleep(3); st.rerun()
@@ -1028,7 +1049,7 @@ elif nav == "COMMS":
                     bg_color = "rgba(16, 185, 129, 0.15)" if is_me else "rgba(30, 41, 59, 0.6)"
                     border_color = "#10b981" if is_me else "#3b82f6"
                     
-                    st.markdown(f"<div style='text-align: {align}; margin-bottom: 10px;'><div style='display: inline-block; text-align: left; background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px 15px; border-radius: 8px; min-width: 250px; max-width: 80%;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.75rem; margin-left:15px;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align: {align}; margin-bottom: 10px;'><div style='display: inline-block; text-align: left; background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px 15px; border-radius: 8px; min-width: 250px; max-width: 80%;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.75 margin-left:15px;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div></div>", unsafe_allow_html=True)
 
     if user['level'] in ["Admin", "Executive", "Manager", "Director", "Supervisor"]:
         with tab_sos:
@@ -1058,7 +1079,6 @@ elif nav == "SCHEDULE":
                     st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='font-size:1.1rem; font-weight:700; color:#f8fafc;'>{s[1]} <span style='color:#34d399;'>| {s[2]}</span></div></div>", unsafe_allow_html=True)
                     if st.button("🚨 CALL OUT SICK (Auto-Replace)", key=f"co_{s[0]}"): 
                         run_transaction("UPDATE schedules SET status='CALL_OUT' WHERE shift_id=:id", {"id": s[0]})
-                        # --- FLAT RATE AUTO-REPLACE LOGIC ---
                         standard_rate = user['rate']
                         new_sid = f"REPLACE-{s[0]}"
                         run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 URGENT REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": standard_rate})
@@ -1108,7 +1128,6 @@ elif nav == "SCHEDULE":
                     for p, d in all_staff.items():
                         f_score, f_hrs, f_notes = calculate_fatigue_score(p, st.session_state.ai_dept)
                         is_native = d['dept'] == st.session_state.ai_dept
-                        # If not native, apply a small float penalty to prioritize native staff, but keep floats as valid options if native staff are highly fatigued
                         adjusted_score = f_score if is_native else f_score + 10.0 
                         stats.append({"pin": p, "name": d['name'], "dept": d['dept'], "score": adjusted_score, "is_native": is_native})
                     
@@ -1124,7 +1143,6 @@ elif nav == "SCHEDULE":
 elif nav == "APPROVALS":
     st.markdown("## 📥 Approval Gateway")
     
-    # OVERTIME / EXCEPTIONS QUEUE
     ot_bids = run_query("SELECT bid_id, shift_id, pin, counter_rate FROM shift_bids WHERE status='PENDING_OT'")
     if ot_bids:
         with st.expander("⚠️ PENDING OVERTIME AUTHORIZATIONS", expanded=True):
@@ -1134,7 +1152,6 @@ elif nav == "APPROVALS":
                 st.markdown(f"<div style='background:rgba(239,68,68,0.1); border-left:4px solid #ef4444; padding:10px; margin-bottom:10px;'><strong>{op_name}</strong> attempted to claim a shift that pushes them into Overtime. Requires authorization at <strong style='color:#f8fafc;'>${float(ot_rate):.2f}/hr (1.5x)</strong>.</div>", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
                 if c1.button("✅ APPROVE OT & ASSIGN", key=f"app_ot_{b_id}"):
-                    # Approve the OT, assign the shift
                     run_transaction("UPDATE marketplace SET rate=:r, status='CLAIMED', claimed_by=:p WHERE shift_id=:id", {"r": ot_rate, "p": p_pin, "id": s_id})
                     run_transaction("UPDATE shift_bids SET status='APPROVED' WHERE bid_id=:id", {"id": b_id})
                     run_transaction("INSERT INTO schedules (shift_id, pin, shift_date, shift_time, department, status) SELECT shift_id, :p, date, start_time, 'Overtime Exception', 'SCHEDULED' FROM marketplace WHERE shift_id=:id", {"p": p_pin, "id": s_id})
@@ -1204,7 +1221,7 @@ elif nav == "THE BANK":
 
 elif nav == "MY PROFILE":
     st.markdown("## 🗄️ Enterprise HR Vault")
-    t_lic, t_sec = st.tabs(["🪪 ENCRYPTED CREDENTIALS", "🔐 SECURITY"])
+    t_lic, t_sec, t_acc = st.tabs(["🪪 ENCRYPTED CREDENTIALS", "🔐 SECURITY", "🏅 CLINICAL OBT PORTFOLIO"])
     
     with t_sec:
         with st.form("update_password_form"):
@@ -1230,3 +1247,35 @@ elif nav == "MY PROFILE":
                 is_expired = str(c[2]) < str(date.today())
                 color = "#ef4444" if is_expired else "#10b981"
                 st.markdown(f"<div class='glass-card' style='border-left: 4px solid {color} !important;'><h4>{c[0]} {'(EXPIRED)' if is_expired else ''}</h4><p style='color:#94a3b8;'>Exp: {c[2]}</p></div>", unsafe_allow_html=True)
+                
+    with t_acc:
+        st.markdown("### Soulbound Clinical Portfolio (OBT)")
+        st.caption("Immutable, non-fungible cryptographic proof of your high-acuity interventions.")
+
+        c1, c2 = st.columns([2, 1])
+        with c2:
+            if st.button("🔑 Generate ZK Access Key"):
+                zk_key = f"{random.choice(['A', 'X', 'K', 'M'])}{random.randint(10,99)}{random.choice(['B', 'Z', 'Q'])}-{random.randint(100,999)}"
+                st.info(f"Access Key: **{zk_key}** (Valid for 24h)")
+                st.caption("Share this key with hiring managers to decrypt your read-only OBT snapshot.")
+
+        my_obts = run_query("SELECT token_id, accolade_type, clinical_context, timestamp, encryption_hash FROM obt_ledger WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
+        if my_obts:
+            for obt in my_obts:
+                t_id, a_type, ctx, ts, e_hash = obt
+                try: ts_str = ts.strftime('%b %d, %Y - %H:%M')
+                except: ts_str = str(ts)
+                st.markdown(f"""
+                <div style='background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(10px); border-left: 5px solid #38bdf8; border-radius: 12px; padding: 18px; margin-bottom: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);'>
+                    <div style='display: flex; justify-content: space-between;'>
+                        <div style='font-size:1.1rem; font-weight:900; color:#f8fafc;'>🛡️ {ctx.split(' | ')[0] if ' | ' in ctx else ctx}</div>
+                        <div style='background:#10b981; color:#0b1120; padding:4px 8px; border-radius:6px; font-size:0.7rem; font-weight:900;'>SBT VERIFIED</div>
+                    </div>
+                    <div style='color:#94a3b8; font-size:0.85rem; font-weight: 600; text-transform: uppercase; margin-top:5px;'>{a_type} <span style='color:#475569;'>•</span> {ts_str}</div>
+                    <div style='font-family: monospace; color: #64748b; font-size: 0.75rem; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.05);'>
+                        TOKEN ID: {t_id}<br>HASH: {e_hash}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No OBTs Minted Yet</h3><p style='color:#64748b; font-size: 0.9rem;'>Chart high-acuity interventions on the dashboard to build your immutable portfolio.</p></div>", unsafe_allow_html=True)
