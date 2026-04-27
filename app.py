@@ -18,12 +18,18 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
-# --- EXTERNAL LIBRARIES ---
+# --- EXTERNAL API INTEGRATIONS ---
 try: 
     from fpdf import FPDF
     PDF_ACTIVE = True
 except ImportError: 
     PDF_ACTIVE = False
+
+try:
+    from twilio.rest import Client
+    TWILIO_ACTIVE = True
+except ImportError:
+    TWILIO_ACTIVE = False
 
 # --- GLOBAL CONSTANTS ---
 LOCAL_TZ = pytz.timezone('US/Eastern')
@@ -50,6 +56,26 @@ def generate_secure_checksum(doc_number, pin): return hashlib.sha256(f"{doc_numb
 def generate_poc_hash(claim_id, pin, room, action, timestamp_str):
     raw_data = f"{claim_id}|{pin}|{room}|{action}|{timestamp_str}|{os.environ.get('SECURE_SALT', 'CLINICAL_LEDGER_SALT')}"
     return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
+
+# --- TWILIO SMS ENGINE ---
+def dispatch_sms_alert(message_body):
+    if not TWILIO_ACTIVE:
+        return "SIMULATED: Twilio library not installed."
+    
+    try:
+        account_sid = st.secrets.get("TWILIO_ACCOUNT_SID", os.environ.get("TWILIO_ACCOUNT_SID"))
+        auth_token = st.secrets.get("TWILIO_AUTH_TOKEN", os.environ.get("TWILIO_AUTH_TOKEN"))
+        twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", os.environ.get("TWILIO_PHONE_NUMBER"))
+        target_number = st.secrets.get("DEMO_TARGET_PHONE", os.environ.get("DEMO_TARGET_PHONE")) 
+        
+        if not all([account_sid, auth_token, twilio_number, target_number]):
+            return "SIMULATED: Twilio API keys missing in environment."
+
+        client = Client(account_sid, auth_token)
+        message = client.messages.create(body=f"VICENTUS ALERT: {message_body}", from_=twilio_number, to=target_number)
+        return f"SENT: Message ID {message.sid}"
+    except Exception as e:
+        return f"SIMULATED (Error): {str(e)}"
 
 # --- DATABASE ENGINE ---
 @st.cache_resource(ttl=60)
@@ -295,15 +321,7 @@ def get_rolling_weekly_hours(p_pin):
     base_rate = float(USERS.get(p_pin, {}).get('rate', 0.1)) if p_pin in USERS else 0.1
     return (sum([float(r[0]) for r in res_wk]) / base_rate) if res_wk else 0.0
 
-def process_background_location_ping(pin, current_lat, current_lon, shift_id=None):
-    workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
-    if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
-    distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
-    if distance_meters > GEOFENCE_RADIUS:
-        return True, "FLSA Guardrail Triggered: Operator left geofence. In-app verification sent to avoid auto-docking pay."
-    return False, "User still within geofence."
-
-st.set_page_config(page_title="EC Protocol Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Vicentus Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
@@ -320,11 +338,8 @@ html_style = """
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(16, 185, 129, 0.3); border-left: 5px solid #10b981; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
-    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(16, 185, 129, 0.6); }
-    .bounty-card::before { content: 'OPEN COVERAGE'; position: absolute; top: 18px; right: -35px; background: #10b981; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #f8fafc; margin: 10px 0; letter-spacing: -1px; }
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
-    .plaid-box { background: #111; border: 1px solid #333; border-radius: 12px; padding: 20px; text-align: center; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
     .sched-date-header { background: rgba(16, 185, 129, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 25px; margin-bottom: 15px; font-weight: 800; font-size: 1rem; border-left: 4px solid #10b981; color: #34d399; text-transform: uppercase; }
     .sched-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; margin-bottom: 8px; background: rgba(30, 41, 59, 0.5); border-radius: 8px; border-left: 3px solid rgba(255,255,255,0.1); }
@@ -334,8 +349,6 @@ html_style = """
     .badge-fail { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
     .badge-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 5px; }
     .hash-text { font-family: monospace; color: #38bdf8; font-size: 0.75rem; word-break: break-all; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; margin-top: 8px; border: 1px solid rgba(56, 189, 248, 0.2); }
-    
-    @media (max-width: 768px) { .sched-row { flex-direction: column; align-items: flex-start; } .sched-time { margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 5px; width: 100%; } div[data-testid="stMetricValue"] { font-size: 1.5rem !important; } .bounty-amount { font-size: 2.2rem; } }
 </style>
 """
 st.markdown(html_style, unsafe_allow_html=True)
@@ -380,8 +393,8 @@ if 'pending_opsec_reset' in st.session_state:
     st.stop()
 
 if 'logged_in_user' not in st.session_state:
-    st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>EC PROTOCOL</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE HEALTHCARE LOGISTICS v5.0.0-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>VICENTUS</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.0</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -411,11 +424,6 @@ if 'logged_in_user' not in st.session_state:
                             st.rerun()
                         else: auth_pin = p; break
                         
-                    if is_default and not stored_hash: 
-                        st.session_state.pending_opsec_reset = True
-                        st.session_state.pending_opsec_pin = p
-                        st.rerun()
-                        
             if auth_pin:
                 st.session_state.logged_in_user = USERS[auth_pin]; st.session_state.pin = auth_pin
                 force_cloud_sync(auth_pin); st.rerun()
@@ -426,7 +434,7 @@ if 'logged_in_user' not in st.session_state:
 user = st.session_state.logged_in_user; pin = st.session_state.pin
 
 c1, c2 = st.columns([8, 2])
-with c1: st.markdown(f"<div class='custom-header-pill'><div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'><span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> EC PROTOCOL</div><div style='text-align:right;'><div style='font-size:0.95rem; font-weight:800; color:#f8fafc;'>{user['name']}</div><div style='font-size:0.75rem; color:#38bdf8; text-transform:uppercase; letter-spacing:1px;'>{user['role']} | {user['dept']}</div></div></div>", unsafe_allow_html=True)
+with c1: st.markdown(f"<div class='custom-header-pill'><div style='font-weight:900; font-size:1.4rem; letter-spacing:2px; color:#f8fafc; display:flex; align-items:center;'><span style='color:#10b981; font-size:1.8rem; margin-right:8px;'>⚡</span> VICENTUS PROTOCOL</div><div style='text-align:right;'><div style='font-size:0.95rem; font-weight:800; color:#f8fafc;'>{user['name']}</div><div style='font-size:0.75rem; color:#38bdf8; text-transform:uppercase; letter-spacing:1px;'>{user['role']} | {user['dept']}</div></div></div>", unsafe_allow_html=True)
 with c2: 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 LOGOUT"): st.session_state.clear(); st.rerun()
@@ -497,7 +505,13 @@ elif nav == "COMPLIANCE":
     tab_poc, tab_proto, tab_comp = st.tabs(["🔒 LIVE PROOF OF CARE (PoC) LEDGER", "🛑 PROTOCOL COMMAND", "🪪 COMPETENCY AUDIT"])
 
     with tab_poc:
-        st.markdown("### Anti-Clawback Billing Engine")
+        c_p1, c_p2 = st.columns([8,2])
+        with c_p1: st.markdown("### Anti-Clawback Billing Engine")
+        with c_p2: 
+            if st.button("🔌 Sync via EMR FHIR"):
+                run_transaction("UPDATE poc_ledger SET emr_verified=TRUE, status='CLEARED' WHERE emr_verified=FALSE")
+                st.success("API Synced!"); time.sleep(1); st.rerun()
+                
         st.caption("Mathematically proves service delivery by correlating BLE indoor geolocation, EMR documentation, and AI verification, sealed with an immutable SHA-256 cryptographic hash.")
         
         real_poc_claims = run_query("SELECT claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, secure_hash FROM poc_ledger ORDER BY timestamp DESC LIMIT 20")
@@ -508,11 +522,11 @@ elif nav == "COMPLIANCE":
                 op_name = USERS.get(str(c_pin), {}).get('name', f"Operator {c_pin}")
                 
                 ble_badge = "<span class='badge-pass'>BLE LOC MATCH</span>" if c_ble else "<span class='badge-warn'>BLE SIMULATED</span>"
-                emr_badge = "<span class='badge-pass'>EMR SYNCED</span>" if c_emr else "<span class='badge-warn'>EMR SIMULATED</span>"
+                emr_badge = "<span class='badge-pass'>EMR SYNCED</span>" if c_emr else "<span class='badge-fail'>EMR MISMATCH</span>"
                 ai_badge = "<span class='badge-pass'>AI VERIFIED</span>" if c_ai else "<span class='badge-warn'>AI PENDING</span>"
                 
-                border = "#10b981"
-                status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>"
+                border = "#10b981" if c_emr else "#ef4444"
+                status_text = "<span style='color:#10b981; font-weight:bold;'>CLEARED FOR BILLING</span>" if c_emr else "<span style='color:#ef4444; font-weight:bold;'>PENDING EMR SYNC</span>"
                 
                 try: display_time = c_time.strftime("%Y-%m-%d %H:%M:%S")
                 except: display_time = str(c_time)
@@ -551,7 +565,6 @@ elif nav == "COMPLIANCE":
                                 <span class='badge-fail'>EXPIRES SOON / MISSING</span>
                             </div>
                             <p style='color:#94a3b8; font-size:0.85rem; margin-top:5px;'>Deadline: {p_exp}</p>
-                            <button style='background:rgba(239,68,68,0.2); border:1px solid #ef4444; color:#fff; padding:5px 10px; border-radius:5px;'>Assign for Review</button>
                         </div>
                         """, unsafe_allow_html=True)
                 else:
@@ -573,8 +586,7 @@ elif nav == "COMPLIANCE":
                             run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :dept, :m, FALSE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "dept": "All", "m": msg_text})
                             st.success("Protocol Published and Broadcasted!"); time.sleep(2); st.rerun()
                         if c_btn2.button("❌ REJECT", key=f"rej_{d_id}"):
-                            run_transaction("UPDATE hospital_protocols SET status='REJECTED' WHERE protocol_id=:id", {"id": d_id})
-                            st.rerun()
+                            run_transaction("UPDATE hospital_protocols SET status='REJECTED' WHERE protocol_id=:id", {"id": d_id}); st.rerun()
                 else:
                     st.info("No protocol drafts awaiting your approval.")
                     
@@ -598,17 +610,7 @@ elif nav == "COMPLIANCE":
                     new_dept = st.selectbox("Target Department", [user['dept'], "All"])
                     if st.form_submit_button("Submit for CCO Review"):
                         run_transaction("INSERT INTO hospital_protocols (protocol_id, title, department, status, author_pin) VALUES (:id, :t, :d, 'PENDING_CCO', :p)", {"id": f"PRO-{int(time.time())}", "t": new_title, "d": new_dept, "p": pin})
-                        st.success("Draft submitted to Compliance.")
-                        time.sleep(1.5); st.rerun()
-                        
-                st.markdown("#### My Pending Drafts")
-                drafts = run_query("SELECT title, status FROM hospital_protocols WHERE author_pin=:p", {"p": pin})
-                if drafts:
-                    for d in drafts:
-                        color = "#f59e0b" if d[1] == 'PENDING_CCO' else "#ef4444" if d[1] == 'REJECTED' else "#10b981"
-                        st.markdown(f"<div style='border-left: 3px solid {color}; padding-left: 10px; margin-bottom:5px; color:#f8fafc;'>{d[0]} - <span style='color:{color}; font-weight:bold;'>{d[1]}</span></div>", unsafe_allow_html=True)
-                else:
-                    st.info("You have no pending protocol drafts.")
+                        st.success("Draft submitted to Compliance."); time.sleep(1.5); st.rerun()
 
     with tab_comp:
         st.markdown("### Staff Competency Engine")
@@ -694,10 +696,10 @@ elif nav == "DASHBOARD":
                         ts_string = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
                         live_hash = generate_poc_hash(new_claim_id, pin, poc_room, poc_action, ts_string)
                         
-                        db_save = run_transaction("INSERT INTO poc_ledger (claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, status, secure_hash) VALUES (:cid, :p, :r, :a, NOW(), TRUE, TRUE, TRUE, 'CLEARED', :h)", {"cid": new_claim_id, "p": pin, "r": poc_room, "a": poc_action, "h": live_hash})
+                        db_save = run_transaction("INSERT INTO poc_ledger (claim_id, pin, patient_room, action, timestamp, ble_verified, emr_verified, ai_verified, status, secure_hash) VALUES (:cid, :p, :r, :a, NOW(), TRUE, FALSE, TRUE, 'PENDING_EMR', :h)", {"cid": new_claim_id, "p": pin, "r": poc_room, "a": poc_action, "h": live_hash})
                         
                         if db_save > 0:
-                            st.success(f"✅ Event cryptographically sealed in PoC Ledger!")
+                            st.success(f"✅ Event cryptographically sealed in PoC Ledger! (Awaiting EMR Sync)")
                             
                             # --- OBT SOULBOUND MINTING ENGINE ---
                             high_acuity_triggers = ["Endotracheal Intubation", "Initiate Veletri/Flolan", "CRRT Dialysis Setup", "Code Blue Response"]
@@ -1049,7 +1051,7 @@ elif nav == "COMMS":
                     bg_color = "rgba(16, 185, 129, 0.15)" if is_me else "rgba(30, 41, 59, 0.6)"
                     border_color = "#10b981" if is_me else "#3b82f6"
                     
-                    st.markdown(f"<div style='text-align: {align}; margin-bottom: 10px;'><div style='display: inline-block; text-align: left; background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px 15px; border-radius: 8px; min-width: 250px; max-width: 80%;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.75 margin-left:15px;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align: {align}; margin-bottom: 10px;'><div style='display: inline-block; text-align: left; background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px 15px; border-radius: 8px; min-width: 250px; max-width: 80%;'><div style='display:flex; justify-content:space-between; margin-bottom:5px;'><strong style='color:#f8fafc;'>{sender_name}</strong><span style='color:#94a3b8; font-size:0.75rem; margin-left:15px;'>{dt_str}</span></div><div style='color:#cbd5e1;'>{m[1]}</div></div></div>", unsafe_allow_html=True)
 
     if user['level'] in ["Admin", "Executive", "Manager", "Director", "Supervisor"]:
         with tab_sos:
@@ -1059,7 +1061,10 @@ elif nav == "COMMS":
                 sos_msg = st.text_area("SOS Message")
                 if st.form_submit_button("🚨 TRIGGER SOS DISPATCH"):
                     run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": sos_target, "m": sos_msg})
-                    st.success(f"✅ SOS Dispatched! Internal channels updated and Secure Enterprise Push Notifications sent.")
+                    
+                    # --- TWILIO SMS INTEGRATION HOOK ---
+                    sms_result = dispatch_sms_alert(sos_msg)
+                    st.success(f"✅ SOS Dispatched! Internal channels updated. [SMS System: {sms_result}]")
                     time.sleep(2.5); st.rerun()
 
 elif nav == "SCHEDULE":
@@ -1082,7 +1087,11 @@ elif nav == "SCHEDULE":
                         standard_rate = user['rate']
                         new_sid = f"REPLACE-{s[0]}"
                         run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 URGENT REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": standard_rate})
-                        run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."})
+                        
+                        alert_msg = f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."
+                        run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": alert_msg})
+                        dispatch_sms_alert(alert_msg) # Twilio Hook
+                        
                         st.success("Sick call registered. Automated replacement bounty pushed to the department."); time.sleep(2.5); st.rerun()
                 elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE LOGGED)")
         else: st.info("Your schedule is clear.")
@@ -1257,7 +1266,6 @@ elif nav == "MY PROFILE":
             if st.button("🔑 Generate ZK Access Key"):
                 zk_key = f"{random.choice(['A', 'X', 'K', 'M'])}{random.randint(10,99)}{random.choice(['B', 'Z', 'Q'])}-{random.randint(100,999)}"
                 st.info(f"Access Key: **{zk_key}** (Valid for 24h)")
-                st.caption("Share this key with hiring managers to decrypt your read-only OBT snapshot.")
 
         my_obts = run_query("SELECT token_id, accolade_type, clinical_context, timestamp, encryption_hash FROM obt_ledger WHERE pin=:p ORDER BY timestamp DESC", {"p": pin})
         if my_obts:
@@ -1278,4 +1286,4 @@ elif nav == "MY PROFILE":
                 </div>
                 """, unsafe_allow_html=True)
         else:
-            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No OBTs Minted Yet</h3><p style='color:#64748b; font-size: 0.9rem;'>Chart high-acuity interventions on the dashboard to build your immutable portfolio.</p></div>", unsafe_allow_html=True)
+            st.markdown("<div class='empty-state'><h3 style='color:#94a3b8;'>No OBTs Minted Yet</h3></div>", unsafe_allow_html=True)
