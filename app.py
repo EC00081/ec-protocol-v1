@@ -394,7 +394,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>VICENTUS</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.0</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.1.0 (Live Build)</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -611,6 +611,15 @@ elif nav == "COMPLIANCE":
                     if st.form_submit_button("Submit for CCO Review"):
                         run_transaction("INSERT INTO hospital_protocols (protocol_id, title, department, status, author_pin) VALUES (:id, :t, :d, 'PENDING_CCO', :p)", {"id": f"PRO-{int(time.time())}", "t": new_title, "d": new_dept, "p": pin})
                         st.success("Draft submitted to Compliance."); time.sleep(1.5); st.rerun()
+                        
+                st.markdown("#### My Pending Drafts")
+                drafts = run_query("SELECT title, status FROM hospital_protocols WHERE author_pin=:p", {"p": pin})
+                if drafts:
+                    for d in drafts:
+                        color = "#f59e0b" if d[1] == 'PENDING_CCO' else "#ef4444" if d[1] == 'REJECTED' else "#10b981"
+                        st.markdown(f"<div style='border-left: 3px solid {color}; padding-left: 10px; margin-bottom:5px; color:#f8fafc;'>{d[0]} - <span style='color:{color}; font-weight:bold;'>{d[1]}</span></div>", unsafe_allow_html=True)
+                else:
+                    st.info("You have no pending protocol drafts.")
 
     with tab_comp:
         st.markdown("### Staff Competency Engine")
@@ -1062,7 +1071,7 @@ elif nav == "COMMS":
                 if st.form_submit_button("🚨 TRIGGER SOS DISPATCH"):
                     run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": sos_target, "m": sos_msg})
                     
-                    # --- TWILIO SMS INTEGRATION HOOK ---
+                    # --- TWILIO SMS HOOK ---
                     sms_result = dispatch_sms_alert(sos_msg)
                     st.success(f"✅ SOS Dispatched! Internal channels updated. [SMS System: {sms_result}]")
                     time.sleep(2.5); st.rerun()
@@ -1084,13 +1093,15 @@ elif nav == "SCHEDULE":
                     st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='font-size:1.1rem; font-weight:700; color:#f8fafc;'>{s[1]} <span style='color:#34d399;'>| {s[2]}</span></div></div>", unsafe_allow_html=True)
                     if st.button("🚨 CALL OUT SICK (Auto-Replace)", key=f"co_{s[0]}"): 
                         run_transaction("UPDATE schedules SET status='CALL_OUT' WHERE shift_id=:id", {"id": s[0]})
+                        
+                        # --- FLAT RATE AUTO-REPLACE LOGIC ---
                         standard_rate = user['rate']
                         new_sid = f"REPLACE-{s[0]}"
                         run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 URGENT REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": standard_rate})
                         
                         alert_msg = f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."
                         run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": alert_msg})
-                        dispatch_sms_alert(alert_msg) # Twilio Hook
+                        dispatch_sms_alert(alert_msg) 
                         
                         st.success("Sick call registered. Automated replacement bounty pushed to the department."); time.sleep(2.5); st.rerun()
                 elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE LOGGED)")
