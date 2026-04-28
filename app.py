@@ -18,18 +18,12 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 
-# --- EXTERNAL API INTEGRATIONS ---
+# --- EXTERNAL LIBRARIES ---
 try: 
     from fpdf import FPDF
     PDF_ACTIVE = True
 except ImportError: 
     PDF_ACTIVE = False
-
-try:
-    from twilio.rest import Client
-    TWILIO_ACTIVE = True
-except ImportError:
-    TWILIO_ACTIVE = False
 
 # --- GLOBAL CONSTANTS ---
 LOCAL_TZ = pytz.timezone('US/Eastern')
@@ -56,26 +50,6 @@ def generate_secure_checksum(doc_number, pin): return hashlib.sha256(f"{doc_numb
 def generate_poc_hash(claim_id, pin, room, action, timestamp_str):
     raw_data = f"{claim_id}|{pin}|{room}|{action}|{timestamp_str}|{os.environ.get('SECURE_SALT', 'CLINICAL_LEDGER_SALT')}"
     return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
-
-# --- TWILIO SMS ENGINE ---
-def dispatch_sms_alert(message_body):
-    if not TWILIO_ACTIVE:
-        return "SIMULATED: Twilio library not installed."
-    
-    try:
-        account_sid = st.secrets.get("TWILIO_ACCOUNT_SID", os.environ.get("TWILIO_ACCOUNT_SID"))
-        auth_token = st.secrets.get("TWILIO_AUTH_TOKEN", os.environ.get("TWILIO_AUTH_TOKEN"))
-        twilio_number = st.secrets.get("TWILIO_PHONE_NUMBER", os.environ.get("TWILIO_PHONE_NUMBER"))
-        target_number = st.secrets.get("DEMO_TARGET_PHONE", os.environ.get("DEMO_TARGET_PHONE")) 
-        
-        if not all([account_sid, auth_token, twilio_number, target_number]):
-            return "SIMULATED: Twilio API keys missing in environment."
-
-        client = Client(account_sid, auth_token)
-        message = client.messages.create(body=f"VICENTUS ALERT: {message_body}", from_=twilio_number, to=target_number)
-        return f"SENT: Message ID {message.sid}"
-    except Exception as e:
-        return f"SIMULATED (Error): {str(e)}"
 
 # --- DATABASE ENGINE ---
 @st.cache_resource(ttl=60)
@@ -338,6 +312,8 @@ html_style = """
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
     div[role="radiogroup"] { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
     .bounty-card { background: linear-gradient(145deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid rgba(16, 185, 129, 0.3); border-left: 5px solid #10b981; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: transform 0.2s ease; }
+    .bounty-card:hover { transform: translateY(-3px); border: 1px solid rgba(16, 185, 129, 0.6); }
+    .bounty-card::before { content: 'OPEN COVERAGE'; position: absolute; top: 18px; right: -35px; background: #10b981; color: #000; font-size: 0.7rem; font-weight: 900; padding: 6px 40px; transform: rotate(45deg); letter-spacing: 1px; }
     .bounty-amount { font-size: 2.8rem; font-weight: 900; color: #f8fafc; margin: 10px 0; letter-spacing: -1px; }
     .empty-state { text-align: center; padding: 40px 20px; background: rgba(30, 41, 59, 0.3); border: 2px dashed rgba(255,255,255,0.1); border-radius: 16px; margin-top: 20px; margin-bottom: 20px; }
     .stripe-box { background: linear-gradient(135deg, #635bff 0%, #423ed8 100%); border-radius: 12px; padding: 25px; color: white; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(99, 91, 255, 0.4); }
@@ -394,7 +370,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>VICENTUS</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.1.0 (Live Build)</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.0-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -1070,10 +1046,7 @@ elif nav == "COMMS":
                 sos_msg = st.text_area("SOS Message")
                 if st.form_submit_button("🚨 TRIGGER SOS DISPATCH"):
                     run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:id, :p, :d, :m, TRUE)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "d": sos_target, "m": sos_msg})
-                    
-                    # --- TWILIO SMS HOOK ---
-                    sms_result = dispatch_sms_alert(sos_msg)
-                    st.success(f"✅ SOS Dispatched! Internal channels updated. [SMS System: {sms_result}]")
+                    st.success(f"✅ SOS Dispatched! Internal channels updated.")
                     time.sleep(2.5); st.rerun()
 
 elif nav == "SCHEDULE":
@@ -1101,7 +1074,6 @@ elif nav == "SCHEDULE":
                         
                         alert_msg = f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."
                         run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": alert_msg})
-                        dispatch_sms_alert(alert_msg) 
                         
                         st.success("Sick call registered. Automated replacement bounty pushed to the department."); time.sleep(2.5); st.rerun()
                 elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE LOGGED)")
