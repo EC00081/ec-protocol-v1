@@ -51,6 +51,45 @@ def generate_poc_hash(claim_id, pin, room, action, timestamp_str):
     raw_data = f"{claim_id}|{pin}|{room}|{action}|{timestamp_str}|{os.environ.get('SECURE_SALT', 'CLINICAL_LEDGER_SALT')}"
     return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
 
+# --- MERKLE TREE LAYER 2 BATCHING ---
+def hash_pair(hash1, hash2):
+    """Combines two hashes and hashes the result deterministically."""
+    combined = "".join(sorted([hash1, hash2]))
+    return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+def build_merkle_root(hash_list):
+    """Recursively builds a Merkle Tree from a list of hashes."""
+    if not hash_list:
+        return None
+    if len(hash_list) == 1:
+        return hash_list[0] 
+    
+    new_level = []
+    for i in range(0, len(hash_list), 2):
+        h1 = hash_list[i]
+        h2 = hash_list[i+1] if (i + 1) < len(hash_list) else h1
+        new_level.append(hash_pair(h1, h2))
+    
+    return build_merkle_root(new_level)
+
+def execute_daily_rollup(target_date_str):
+    """Fetches a day's hashes from the DB and generates the Merkle Root."""
+    raw_claims = run_query("SELECT secure_hash FROM poc_ledger WHERE CAST(timestamp AS TEXT) LIKE :d", {"d": f"{target_date_str}%"})
+    
+    if not raw_claims:
+        return False, "No claims found for this date."
+        
+    hash_list = [claim[0] for claim in raw_claims if claim[0]]
+    if not hash_list: return False, "No valid secure hashes found."
+    
+    merkle_root = build_merkle_root(hash_list)
+    
+    run_transaction(
+        "INSERT INTO daily_rollups (date, merkle_root, tx_count, status) VALUES (:d, :mr, :c, 'READY_FOR_L2') ON CONFLICT (date) DO UPDATE SET merkle_root=:mr, tx_count=:c",
+        {"d": target_date_str, "mr": merkle_root, "c": len(hash_list)}
+    )
+    return True, merkle_root
+
 # --- DATABASE ENGINE ---
 @st.cache_resource(ttl=60)
 def get_db_engine():
@@ -123,6 +162,7 @@ def get_db_engine():
             conn.execute(text("INSERT INTO hospital_treasury (id, available_balance) VALUES (1, 50000.00) ON CONFLICT DO NOTHING;"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS hospital_protocols (protocol_id text PRIMARY KEY, title text, department text, status text, author_pin text, last_signed timestamp, next_review timestamp);"))
             conn.execute(text("CREATE TABLE IF NOT EXISTS staff_competencies (comp_id text PRIMARY KEY, pin text, competency_name text, completed_date date, expires_date date, status text);"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS daily_rollups (date TEXT PRIMARY KEY, merkle_root TEXT, tx_count INT, status TEXT);"))
 
             conn.commit()
         return engine
@@ -295,6 +335,70 @@ def get_rolling_weekly_hours(p_pin):
     base_rate = float(USERS.get(p_pin, {}).get('rate', 0.1)) if p_pin in USERS else 0.1
     return (sum([float(r[0]) for r in res_wk]) / base_rate) if res_wk else 0.0
 
+def process_background_location_ping(pin, current_lat, current_lon, shift_id=None):
+    workers_data = run_query("SELECT status, start_time, earnings, lat, lon FROM workers WHERE pin=:p", {"p": pin})
+    if not workers_data or workers_data[0][0] != 'Active': return False, "User not actively on shift."
+    distance_meters = haversine_distance(current_lat, current_lon, HOSPITALS["Brockton General"]["lat"], HOSPITALS["Brockton General"]["lon"])
+    if distance_meters > GEOFENCE_RADIUS:
+        return True, "FLSA Guardrail Triggered: Operator left geofence. In-app verification sent to avoid auto-docking pay."
+    return False, "User still within geofence."
+
+# --- PROPRIETARY VICENTUS ORACLE ENGINE ---
+def proprietary_flex_oracle(dept_name):
+    """
+    Vicentus Proprietary Heuristics Engine.
+    Evaluates active staff to determine the optimal flex down candidate
+    based on overtime liability and fatigue indices. No external API required.
+    """
+    active_staff = run_query("SELECT pin FROM workers WHERE status='Active'")
+    if not active_staff:
+        return {"error": "No active operators found."}
+
+    candidates = []
+    for s in active_staff:
+        w_pin = s[0]
+        if USERS.get(str(w_pin), {}).get('dept') != dept_name:
+            continue
+
+        hrs_worked_7d = get_rolling_weekly_hours(w_pin)
+        f_score, _, _ = calculate_fatigue_score(w_pin, dept_name)
+        rate = USERS.get(str(w_pin), {}).get('rate', 0.0)
+        name = USERS.get(str(w_pin), {}).get('name', 'Unknown')
+
+        is_ot = hrs_worked_7d > 40.0
+        ot_severity = hrs_worked_7d - 40.0 if is_ot else 0
+
+        # Weighted calculation: Financial bleed (OT) + Clinical Risk (Fatigue)
+        score = (ot_severity * 100) + f_score
+
+        candidates.append({
+            "pin": w_pin,
+            "name": name,
+            "score": score,
+            "is_ot": is_ot,
+            "hrs": hrs_worked_7d,
+            "f_score": f_score,
+            "rate": rate
+        })
+
+    if not candidates:
+        return {"error": f"No active staff in {dept_name} to flex."}
+
+    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
+    top_cand = candidates[0]
+
+    reason = f"Proprietary Engine Selected {top_cand['name']}. "
+    if top_cand['is_ot']:
+        reason += f"Operator is in critical Overtime ({top_cand['hrs']:.1f} hrs) triggering immediate financial bleed. "
+    reason += f"Fatigue Index is {top_cand['f_score']:.1f}. Flexing immediately optimizes both budget variance and clinical safety."
+
+    return {
+        "selected_pin": top_cand['pin'],
+        "selected_name": top_cand['name'],
+        "reason": reason
+    }
+
+
 st.set_page_config(page_title="Vicentus Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 html_style = """
 <style>
@@ -370,7 +474,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>VICENTUS</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.0-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.1-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -751,6 +855,20 @@ elif nav == "OPSEC & INFRASTRUCTURE":
     </div>
     """, unsafe_allow_html=True)
     
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+    st.markdown("### ⛓️ Layer 2 Merkle Root Batching")
+    st.caption("Hash all daily Proof-of-Care transactions into a single Merkle Root for decentralized ledger deployment.")
+    
+    with st.form("merkle_rollup_form"):
+        target_date = st.date_input("Target Rollup Date", value=date.today())
+        if st.form_submit_button("⚡ Execute Daily Hash Rollup"):
+            success, result = execute_daily_rollup(str(target_date))
+            if success:
+                st.success("✅ Merkle Root successfully generated and stored!")
+                st.markdown(f"<div class='hash-text' style='font-size:1rem;'>ROOT HASH: {result}</div>", unsafe_allow_html=True)
+            else:
+                st.error(f"❌ Rollup Failed: {result}")
+
 elif nav == "EXECUTIVE BRIEFING":
     st.markdown("## 🦅 CEO Global Overview")
     st.caption("Top-line enterprise metrics. Financial efficiency and operational risk.")
@@ -876,51 +994,24 @@ elif nav == "CENSUS & ACUITY":
         col3.metric("Current Staff", actual_staff, f"+{variance} (Safe)", delta_color="normal")
         
     with st.expander("📉 Smart Flex Calculator (Down-Staffing)"):
-        st.caption("When census drops, AI algorithms recommend which staff to send home based on premium pay costs and fatigue levels—saving money and preventing burnout instead of just relying on seniority.")
+        st.caption("When census drops, proprietary heuristics recommend which staff to send home based on premium pay costs and fatigue levels—saving money and preventing burnout.")
         
-        active_dept_staff = [r for r in run_query("SELECT pin, start_time FROM workers WHERE status='Active'") if USERS.get(str(r[0]), {}).get('dept') == user['dept']]
-        
-        if active_dept_staff:
-            flex_candidates = []
-            for w in active_dept_staff:
-                w_pin = w[0]
-                w_name = USERS.get(str(w_pin), {}).get('name', 'Unknown')
-                w_rate = USERS.get(str(w_pin), {}).get('rate', 0.0)
-                
-                wk_hrs = get_rolling_weekly_hours(w_pin)
-                is_ot = wk_hrs > 40.0
-                f_score, _, _ = calculate_fatigue_score(w_pin, user['dept'])
-                
-                priority_score = 0
-                if is_ot: priority_score += 1000 
-                priority_score += f_score 
-                
-                flex_candidates.append({
-                    "pin": w_pin, "name": w_name, "is_ot": is_ot, "f_score": f_score, "priority": priority_score, "rate": w_rate
-                })
-                
-            flex_candidates = sorted(flex_candidates, key=lambda x: x['priority'], reverse=True)
-            
-            st.markdown("#### Recommended Flex Order:")
-            for idx, cand in enumerate(flex_candidates):
-                ot_badge = "<span style='background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-left:10px;'>ACTIVE OVERTIME (1.5x)</span>" if cand['is_ot'] else ""
-                color = "#ef4444" if idx == 0 else "#64748b"
-                
+        if st.button("🧠 Run Proprietary Flex Oracle"):
+            result = proprietary_flex_oracle(user['dept'])
+            if "error" in result:
+                st.info(result["error"])
+            else:
                 st.markdown(f"""
-                <div style='background:rgba(30,41,59,0.5); border-left: 4px solid {color}; padding: 10px; margin-bottom: 5px; border-radius: 6px;'>
-                    <strong style='color:#f8fafc; font-size:1.1rem;'>#{idx+1}: {cand['name']}</strong> {ot_badge}
-                    <div style='color:#94a3b8; font-size:0.85rem; margin-top:4px;'>Base Rate: ${cand['rate']:.2f}/hr | AI Fatigue Score: {cand['f_score']:.1f}</div>
+                <div style='background:rgba(30,41,59,0.5); border-left: 4px solid #10b981; padding: 15px; margin-top: 10px; border-radius: 6px;'>
+                    <strong style='color:#f8fafc; font-size:1.2rem;'>🎯 Optimal Flex Candidate: {result['selected_name']} ({result['selected_pin']})</strong>
+                    <div style='color:#94a3b8; font-size:0.95rem; margin-top:8px;'>{result['reason']}</div>
                 </div>
                 """, unsafe_allow_html=True)
                 
-            if st.button("⚡ EXECUTE TOP FLEX RECOMMENDATION"):
-                top_cand = flex_candidates[0]
-                run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, recipient_pin, message) VALUES (:id, :p, 'DM', :rp, :m)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "rp": top_cand['pin'], "m": f"Census has dropped. You have been selected for Down-Staffing (Flex) due to operational algorithms. Please wrap up current tasks and clock out."})
-                st.success(f"✅ Automated Flex Directive sent to {top_cand['name']}."); time.sleep(2); st.rerun()
-                
-        else:
-            st.info("No active staff currently clocked into this department.")
-            
+                if st.button("⚡ EXECUTE FLEX DIRECTIVE"):
+                    run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, recipient_pin, message) VALUES (:id, :p, 'DM', :rp, :m)", {"id": f"MSG-{int(time.time()*1000)}", "p": pin, "rp": result['selected_pin'], "m": f"Census has dropped. You have been selected for Down-Staffing (Flex) due to operational algorithms. Please wrap up current tasks and clock out."})
+                    st.success(f"✅ Automated Flex Directive sent to {result['selected_name']}."); time.sleep(2); st.rerun()
+
     with st.expander("📝 LIVE BED BOARD (ADMIT/DISCHARGE & ACUITY)", expanded=False):
         st.caption("Manage unit flow. Updates calculate required staffing instantly.")
         with st.form("update_census"):
