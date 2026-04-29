@@ -27,7 +27,11 @@ except ImportError:
 # --- GLOBAL CONSTANTS ---
 LOCAL_TZ = pytz.timezone('US/Eastern')
 GEOFENCE_RADIUS = 150
-HOSPITALS = {"Brockton General": {"lat": 42.0875, "lon": -70.9915}, "Remote/Anywhere": {"lat": 0.0, "lon": 0.0}}
+# Updated for Demo/Pilot Flexibility
+HOSPITALS = {
+    "Hospital A": {"lat": 0.0, "lon": 0.0}, 
+    "Hospital B": {"lat": 0.0, "lon": 0.0}
+}
 OPSEC_PW_EXPIRY_DAYS = 90
 
 # --- CRYPTO & OPSEC ---
@@ -450,7 +454,7 @@ if 'pending_opsec_reset' in st.session_state:
 
 if 'logged_in_user' not in st.session_state:
     st.markdown("<br><br><br><br><h1 style='text-align: center; color: #f8fafc; letter-spacing: 4px; font-weight: 900; font-size: 3rem;'>VICENTUS</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.2-Live</p><br>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #10b981; letter-spacing: 3px; font-weight:600;'>ENTERPRISE PROTOCOL v6.0.3-Live</p><br>", unsafe_allow_html=True)
     with st.container():
         if not USERS: st.error("❌ CRITICAL: No user accounts found in the database. Please check Supabase table.")
         st.markdown("<div class='glass-card' style='max-width: 500px; margin: 0 auto;'>", unsafe_allow_html=True)
@@ -778,7 +782,7 @@ elif nav == "DASHBOARD":
                                 sbt_hash = hashlib.sha256(f"{sbt_id}|{poc_action}|{poc_room}".encode('utf-8')).hexdigest()
                                 run_transaction("""
                                     INSERT INTO obt_ledger (token_id, pin, accolade_type, clinical_context, facility_origin, encryption_hash) 
-                                    VALUES (:t_id, :p, 'Critical Intervention', :ctx, 'Brockton General', :hash)
+                                    VALUES (:t_id, :p, 'Critical Intervention', :ctx, 'Hospital A', :hash)
                                 """, {"t_id": sbt_id, "p": pin, "ctx": f"{poc_action} | {poc_room}", "hash": sbt_hash})
                                 
                                 st.success(f"🏅 HIGH ACUITY MILESTONE MINTED: {poc_action} permanently added to your OBT Portfolio.")
@@ -797,18 +801,20 @@ elif nav == "DASHBOARD":
             if camera_photo and loc:
                 user_lat, user_lon = loc['coords']['latitude'], loc['coords']['longitude']
                 fac_lat, fac_lon = HOSPITALS[selected_facility]["lat"], HOSPITALS[selected_facility]["lon"]
-                if selected_facility != "Remote/Anywhere":
-                    if haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
-                        st.success(f"✅ Geofence Confirmed.")
-                        start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
-                        if st.button("PUNCH IN") and start_pin == pin:
-                            start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
-                    else: st.error("❌ Geofence Failed.")
-                else:
-                    st.success("✅ Remote Check-in Authorized.")
-                    start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_rem")
-                    if st.button("PUNCH IN (REMOTE)") and start_pin == pin:
-                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: Remote"); st.rerun()
+                
+                # --- DEMO MODE BYPASS FOR GEOFENCE ---
+                if fac_lat == 0.0 and fac_lon == 0.0:
+                    st.success(f"✅ Demo Mode Active: Geofence automatically bypassed for {selected_facility}.")
+                    start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin_demo")
+                    if st.button("PUNCH IN") and start_pin == pin:
+                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                elif haversine_distance(user_lat, user_lon, fac_lat, fac_lon) <= GEOFENCE_RADIUS:
+                    st.success(f"✅ Geofence Confirmed.")
+                    start_pin = st.text_input("Enter PIN to Clock In", type="password", key="start_pin")
+                    if st.button("PUNCH IN") and start_pin == pin:
+                        start_t = time.time(); update_status(pin, "Active", start_t, st.session_state.user_state.get('earnings', 0.0), user_lat, user_lon); st.session_state.user_state['active'] = True; st.session_state.user_state['start_time'] = start_t; log_action(pin, "CLOCK IN", 0, f"Loc: {selected_facility}"); st.rerun()
+                else: 
+                    st.error("❌ Geofence Failed.")
         else:
             st.caption("✨ VIP Security Override Active")
             start_pin = st.text_input("Enter PIN to Clock In", type="password", key="vip_start_pin")
@@ -1138,11 +1144,15 @@ elif nav == "SCHEDULE":
                     st.markdown(f"<div class='glass-card' style='border-left: 4px solid #10b981 !important;'><div style='font-size:1.1rem; font-weight:700; color:#f8fafc;'>{s[1]} <span style='color:#34d399;'>| {s[2]}</span></div></div>", unsafe_allow_html=True)
                     if st.button("🚨 CALL OUT SICK (Auto-Replace)", key=f"co_{s[0]}"): 
                         run_transaction("UPDATE schedules SET status='CALL_OUT' WHERE shift_id=:id", {"id": s[0]})
+                        
+                        # --- FLAT RATE AUTO-REPLACE LOGIC ---
                         standard_rate = user['rate']
                         new_sid = f"REPLACE-{s[0]}"
                         run_transaction("INSERT INTO marketplace (shift_id, poster_pin, role, date, start_time, end_time, rate, status, escrow_status) VALUES (:id, 'SYSTEM', :r, :d, :t, '12hr', :rt, 'OPEN', 'PENDING') ON CONFLICT DO NOTHING", {"id": new_sid, "r": f"🚨 URGENT REPLACEMENT: {s[4]}", "d": s[1], "t": s[2], "rt": standard_rate})
+                        
                         alert_msg = f"URGENT SICK CALL REPLACEMENT: {s[4]} unit for {s[1]}. Shift posted in Marketplace at standard rate."
                         run_transaction("INSERT INTO messages (msg_id, sender_pin, target_dept, message, is_sos) VALUES (:mid, 'SYSTEM', :dept, :m, TRUE)", {"mid": f"MSG-{int(time.time()*1000)}", "dept": s[4], "m": alert_msg})
+                        
                         st.success("Sick call registered. Automated replacement bounty pushed to the department."); time.sleep(2.5); st.rerun()
                 elif s[3] == 'CALL_OUT': st.error(f"🚨 {s[1]} | {s[2]} (SICK LEAVE LOGGED)")
         else: st.info("Your schedule is clear.")
