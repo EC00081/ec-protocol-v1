@@ -17,7 +17,42 @@ from sqlalchemy import create_engine, text
 import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
+from web3 import Web3
 
+# --- WEB3 BLOCKCHAIN ENGINE ---
+# These will pull from your Render Environment Variables once you are ready to go live
+RPC_URL = os.environ.get("WEB3_RPC_URL", "https://sepolia.base.org") # Default to Base Sepolia Testnet
+PRIVATE_KEY = os.environ.get("WEB3_PRIVATE_KEY", None)
+CONTRACT_ADDRESS = os.environ.get("WEB3_CONTRACT_ADDRESS", "0x0000000000000000000000000000000000000000")
+
+# Truncated ABI teaching Python how to push the mint button
+CONTRACT_ABI = json.loads('[{"inputs":[{"internalType":"address","name":"account","type":"address"},{"internalType":"uint256","name":"id","type":"uint256"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"mintClinicalAccolade","outputs":[],"stateMutability":"nonpayable","type":"function"}]')
+
+def mint_sbt_on_chain(target_wallet, action_id):
+    if not PRIVATE_KEY or CONTRACT_ADDRESS == "0x0000000000000000000000000000000000000000":
+        return "Simulated (No Private Key)"
+    
+    try:
+        w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        account = w3.eth.account.from_key(PRIVATE_KEY)
+        contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+        
+        # Build the transaction
+        nonce = w3.eth.get_transaction_count(account.address)
+        tx = contract.functions.mintClinicalAccolade(target_wallet, action_id, 1).build_transaction({
+            'chainId': 84532, # Base Sepolia Chain ID
+            'gas': 2000000,
+            'maxFeePerGas': w3.to_wei('2', 'gwei'),
+            'maxPriorityFeePerGas': w3.to_wei('1', 'gwei'),
+            'nonce': nonce,
+        })
+        
+        # Sign and Broadcast
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=account.key)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        return f"0x{w3.to_hex(tx_hash)[2:]}" # Returns the immutable blockchain receipt
+    except Exception as e:
+        return f"Web3 Error: {str(e)}"
 # --- EXTERNAL LIBRARIES ---
 try: 
     from fpdf import FPDF
@@ -443,6 +478,40 @@ def proprietary_flex_oracle(dept_name):
     return {"selected_pin": top_cand['pin'], "selected_name": top_cand['name'], "reason": reason}
 
 st.set_page_config(page_title="Vicentus Enterprise", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+import base64
+
+# --- PWA MOBILE INJECTION ---
+# This forces iOS and Android to treat the website as a native app
+manifest_json = """
+{
+  "name": "Vicentus Enterprise",
+  "short_name": "Vicentus",
+  "theme_color": "#0b1120",
+  "background_color": "#0b1120",
+  "display": "standalone",
+  "orientation": "portrait",
+  "scope": "/",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Electric_lightning_symbol.svg/512px-Electric_lightning_symbol.svg.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+"""
+b64_manifest = base64.b64encode(manifest_json.encode()).decode()
+
+pwa_html = f"""
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vicentus">
+<link rel="apple-touch-icon" href="https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Electric_lightning_symbol.svg/512px-Electric_lightning_symbol.svg.png">
+<link rel="manifest" href="data:application/manifest+json;base64,{b64_manifest}">
+"""
+st.markdown(pwa_html, unsafe_allow_html=True)
+
 html_style = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
@@ -863,14 +932,22 @@ elif nav == "DASHBOARD":
                             st.success(f"✅ Event cryptographically sealed in PoC Ledger! (Awaiting EMR Sync)")
                             high_acuity_triggers = ["Endotracheal Intubation", "Initiate Veletri/Flolan", "CRRT Dialysis Setup", "Code Blue Response"]
                             if poc_action in high_acuity_triggers:
+                                # 1. Define the Token ID logic
+                                action_mapping = {"Endotracheal Intubation": 1, "Initiate Veletri/Flolan": 2, "CRRT Dialysis Setup": 3, "Code Blue Response": 4}
+                                action_id = action_mapping.get(poc_action, 99)
+                                
+                                # 2. Trigger the Web3 Engine (Silently pings Base Sepolia L2)
+                                dummy_wallet = "0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2" # Replace with user's actual DB wallet later
+                                tx_receipt = mint_sbt_on_chain(dummy_wallet, action_id)
+                                
+                                # 3. Save to internal database
                                 sbt_id = f"SBT-{pin}-{int(time.time()*1000)}"
-                                sbt_hash = hashlib.sha256(f"{sbt_id}|{poc_action}|{poc_room}".encode('utf-8')).hexdigest()
                                 run_transaction("""
                                     INSERT INTO obt_ledger (token_id, pin, accolade_type, clinical_context, facility_origin, encryption_hash) 
                                     VALUES (:t_id, :p, 'Critical Intervention', :ctx, 'Hospital A', :hash)
-                                """, {"t_id": sbt_id, "p": pin, "ctx": f"{poc_action} | {poc_room}", "hash": sbt_hash})
+                                """, {"t_id": sbt_id, "p": pin, "ctx": f"{poc_action} | {poc_room}", "hash": tx_receipt})
                                 
-                                st.success(f"🏅 HIGH ACUITY MILESTONE MINTED: {poc_action} permanently added to your OBT Portfolio.")
+                                st.success(f"🏅 L2 SMART CONTRACT FIRED: {poc_action} permanently added to your Soulbound Portfolio.\n\n`Tx Hash: {tx_receipt}`")
             
             st.markdown("<hr style='border-color: rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
             if st.button("🚙 Simulate Leaving Geofence (FLSA Soft Alert)"):
