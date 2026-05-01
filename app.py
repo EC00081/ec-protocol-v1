@@ -279,10 +279,10 @@ def get_db_engine():
             res = conn.execute(text("SELECT COUNT(*) FROM enterprise_users")).fetchone()
             if True: 
                 seed_data = [
-                    ("1001", "liam@ecprotocol.com", hash_password("password123"), "Liam O'Neil", "RRT", "Respiratory", "Worker", 120.00, "+15551234567"),
-                    ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 50.00, None),
-                    ("1003", "sarah@ecprotocol.com", hash_password("password123"), "Sarah Jenkins", "Charge RRT", "Respiratory", "Supervisor", 90.00, None),
-                    ("1004", "manager@ecprotocol.com", hash_password("password123"), "David Clark", "Manager", "Respiratory", "Manager", 0.00, None),
+                    ("1001", "liam@ecprotocol.com", hash_password("password123"), "Liam O'Neil", "RRT", "Respiratory", "Worker", 70.00, None),
+                    ("1002", "charles@ecprotocol.com", hash_password("password123"), "Charles Morgan", "RRT", "Respiratory", "Worker", 65.00, None),
+                    ("1003", "sarah@ecprotocol.com", hash_password("password123"), "Sarah Jenkins", "Charge RRT", "Respiratory", "Supervisor", 75.00, None),
+                    ("1004", "manager@ecprotocol.com", hash_password("password123"), "David Clark", "Manager", "Respiratory", "Manager", 90.00, None),
                     ("9001", "ceo@ecprotocol.com", hash_password("password123"), "CEO View", "CEO", "Executive", "Admin", 0.00, None),
                     ("9002", "coo@ecprotocol.com", hash_password("password123"), "COO View", "COO", "Executive", "Admin", 0.00, None),
                     ("9003", "cno@ecprotocol.com", hash_password("password123"), "CNO View", "CNO", "Executive", "Admin", 0.00, None),
