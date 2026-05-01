@@ -15,3 +15,5 @@ bcrypt
 pynacl
 solana
 solders
+fpdf==1.7.2
+web3==6.15.0
